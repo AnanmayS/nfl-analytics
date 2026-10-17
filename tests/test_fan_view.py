@@ -160,14 +160,16 @@ def test_identity_reports_defense():
                                 "worst_at": "run defense"}
 
 
-def test_starting_qb_out_reason():
+def test_qb_change_reason():
     from src.analysis.fan_view import game_reasons
     t = _tiers({}, {})
     game = {"season": 2026, "week": 5, "home_team": "KC", "away_team": "DEN", "neutral": 1,
-            "contrib_d_qb_out": 0.45, "home_qb_out": 0.0, "away_qb_out": 1.0,
-            "away_starting_qb": "Bo Nix"}
+            "contrib_d_qb_change": 0.05, "contrib_d_qb_delta": 0.30,
+            "home_qb_change": 0.0, "away_qb_change": 1.0, "away_qb_delta": -0.15,
+            "away_expected_qb": "Jarrett Stidham", "away_recent_qb": "Bo Nix"}
     r = game_reasons(game, t, {"KC": "Chiefs", "DEN": "Broncos"})
-    assert r == [{"favors": "KC", "push": 0.45,
-                  "text": "Broncos' starting QB Bo Nix is listed Out"}]
-    game.update(away_qb_out=0.2)
-    assert game_reasons(game, t)[0]["text"].endswith("is listed Questionable")
+    assert r == [{"favors": "KC", "push": pytest.approx(0.35),
+                  "text": "Broncos start Jarrett Stidham instead of Bo Nix (a big downgrade)"}]
+    # push pointing the other way contradicts the sentence -> dropped
+    game.update(contrib_d_qb_delta=-0.30)
+    assert game_reasons(game, t) == []

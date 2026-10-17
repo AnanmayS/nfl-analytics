@@ -446,11 +446,12 @@ def page_week() -> None:
         home, away, p = r["home_team"], r["away_team"], r["p_logit"]
         fav, fp = (home, p) if p >= 0.5 else (away, 1 - p)
         result = ""
-        out_qbs = [f"{nick(t)} QB {r[f'{sd}_starting_qb']}"
+        changes = [f"{nick(t)} start {r[f'{sd}_expected_qb']} (usually "
+                   f"{r[f'{sd}_recent_qb']})"
                    for t, sd in ((away, "away"), (home, "home"))
-                   if (r.get(f"{sd}_qb_out") or 0) >= 0.5]
-        qb_flag = (f"<div style='margin-top:6px'>⚠️ Starting QB likely out: {', '.join(out_qbs)}"
-                   "</div>") if out_qbs else ""
+                   if (r.get(f"{sd}_qb_change") or 0) > 0 and r.get(f"{sd}_expected_qb")]
+        qb_flag = (f"<div style='margin-top:6px'>⚠️ QB change: {'; '.join(changes)}</div>"
+                   if changes else "")
         if r["result"] is not None:
             right = None if r["result"] == 0 else (p > 0.5) == (r["result"] > 0)
             tag = {True: "✅ our pick won", False: "❌ our pick lost", None: "tie"}[right]

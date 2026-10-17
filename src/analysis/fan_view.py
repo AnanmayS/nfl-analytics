@@ -333,22 +333,25 @@ def game_reasons(game: dict, tiers: pl.DataFrame, names: dict[str, str] | None =
         if more > less:
             out.append({"favors": fav, "push": abs(rest),
                         "text": f"{nm[fav]} are better rested ({more:.0f} days vs. {less:.0f})"})
-    qb = game.get("contrib_d_qb_out")
-    hq, aq = game.get("home_qb_out") or 0, game.get("away_qb_out") or 0
-    if qb and hq != aq:
-        hurt = home if hq > aq else away
-        fav = away if hurt == home else home
-        if (qb > 0) == (fav == home):  # the push really goes against the team missing its QB
-            name = game.get(f"{'home' if hurt == home else 'away'}_starting_qb") or "QB"
-            out.append({"favors": fav, "push": abs(qb), "text":
-                        f"{nm[hurt]}' starting QB {name} is listed "
-                        f"{status_from_chance(max(hq, aq))}"})
+    qb_push = (game.get("contrib_d_qb_change") or 0) + (game.get("contrib_d_qb_delta") or 0)
+    changed = [(t, sd) for t, sd in ((home, "home"), (away, "away"))
+               if (game.get(f"{sd}_qb_change") or 0) > 0]
+    if qb_push and changed:
+        # Describe the side whose QB swing is biggest; keep it only if the push points the
+        # same way (a downgrade helps the opponent, an upgrade helps the team).
+        t, sd = max(changed, key=lambda x: abs(game.get(f"{x[1]}_qb_delta") or 0))
+        delta = game.get(f"{sd}_qb_delta") or 0
+        helps = t if delta > 0 else (away if t == home else home)
+        if (qb_push > 0) == (helps == home):
+            word = ("a big downgrade" if delta <= -0.08 else "a downgrade" if delta < -0.02
+                    else "an upgrade" if delta > 0.02 else "about even")
+            out.append({"favors": helps, "push": abs(qb_push), "text":
+                        f"{nm[t]} start {game.get(f'{sd}_expected_qb') or 'a new QB'} instead of "
+                        f"{game.get(f'{sd}_recent_qb') or 'their usual starter'} ({word})"})
     return sorted(out, key=lambda r: -r["push"])
 
 
-def status_from_chance(p: float) -> str:
-    """Injury-report status from the sit chance used in the model."""
-    return "Out" if p >= 0.95 else ("Doubtful" if p >= 0.5 else "Questionable")
+
 
 
 def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
