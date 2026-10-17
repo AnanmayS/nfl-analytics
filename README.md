@@ -214,6 +214,32 @@ The stats model improved on held-out seasons but stayed behind Vegas, which was 
 
 The final pick **ties Vegas's pick rate** and is **slightly better calibrated**, clearly so on the holdout (0.6052 vs. 0.6084). Be clear about why: the learned weights are about 1.19 on the line and 0.04 on the stats model. The blend mostly corrects the spread-to-probability conversion, which is a little timid for this era (σ = 13.45), rather than adding new information. With no line posted (games more than a week or two out), the pick is the stats model alone.
 
+### Tuesday picks vs. the opening line
+
+The closing line already contains everything known by kickoff, so it's the hardest possible benchmark. The fairer test of "beating Vegas" is earlier in the week (`src/models/early.py`): a model using only what's known on the **Tuesday of game week**, blended with the **opening** line and scored against that same opening line. Tuesday information means:
+
+- every earlier game (rolling form, opponent-adjusted ratings) and rest days;
+- the QB who has been starting, unless last week's roster had him on injured reserve.
+
+It excludes injury reports (they start Wednesday), announced starters and the closing line. Nothing was re-tuned for this test: it uses the same model settings as above.
+
+Opening lines come from the [Australia Sports Betting](https://www.aussportsbetting.com/data/historical-nfl-results-and-odds-data/) historical NFL file. It is sourced from Pinnacle (2014–Feb 2018), bet365 (Sep 2018–Feb 2025) and betr (Sep 2025 on), and matched to all 2,860 completed games from 2016–2025 (`src/ingest/odds.py`, `game_lines`). The site's bot check means you download it yourself to `data/external/nfl.xlsx`. Its terms allow personal use only and forbid republishing, so the file and everything derived from it stay in the git-ignored `data/` folder.
+
+Results, 2018–26 (2,283 games; `early_week_eval`, `early_week_by_season`):
+
+| | Picks | Log loss |
+|---|---|---|
+| Tuesday stats model (no line) | 64.4% | 0.632 |
+| **Tuesday pick (stats + opening line)** | **66.2%** | **0.620** |
+| Opening line | 65.4% | 0.621 |
+| Closing line (kickoff) | 66.3% | 0.610 |
+
+- **Beats the opening line on picks.** In the 46 games where the Tuesday pick and the opening favorite differed, the Tuesday pick was right 32 times to 14 (exact test p = 0.011). It was ahead in 7 of 9 seasons. The log-loss gain over the opener (−0.0013) is not significant (CI −0.0046 to +0.0021).
+- **Predicts where the line goes.** When the Tuesday model disagrees with the opener by 3+ points, the line moves toward it 67% of the time (644 games, p ≈ 10⁻¹⁹); at 4.5+ points, 70%. The model carries information the opening line doesn't, which the market then prices in by kickoff.
+- **Against the opening spread, not proven.** In those games the model's side covers the opening spread 54.2% (3+ points, 742 games) and 55.4% (4.5+ points, 368 games). That's above the 52.4% break-even at standard odds, but within luck (p = 0.18 and 0.13). It would take several more seasons to tell.
+
+For upcoming games this needs a fresh copy of the file each week; without one, upcoming games have no opening line.
+
 ## Part 3 — Archetype mix → team efficiency
 
 **Composition:** each player-game's offensive snaps (`raw_snap_counts`, mapped to gsis IDs) are tagged with that player-season's archetype. Players below the volume threshold are "Unlabeled". Shares are computed within each position group per team-season (`team_archetype_mix`).
@@ -257,7 +283,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 
 ## Leakage safeguards and tests
 
-`make test` runs 44 tests:
+`make test` runs 46 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -270,6 +296,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 - **Injury availability** (`test_availability.py`): roles come only from earlier games, statuses map to sit chances, a long absence already reflected in recent snaps isn't counted again, and relocated team codes are normalized.
 - **Starting QB** (`test_quarterbacks.py`): ratings use only earlier games and decay old seasons; a new or unknown QB rates at replacement level; a listed starter wins; injured reserve or an Out listing falls back to the backup.
 - **Ratings and blend** (`test_ratings_blend.py`): ratings recover the true team order, don't move when games on or after the week start are changed, and the blend produces nothing for games without a line.
+- **Opening lines and Tuesday picks** (`test_odds_early.py`): old team names, ±1-day dates, duplicate team codes and swapped neutral-site listings match the right game; the evaluation counts disagreements and line moves correctly.
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
