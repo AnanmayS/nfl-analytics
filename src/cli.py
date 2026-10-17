@@ -1,6 +1,7 @@
 """Command-line entry point: python -m src.cli <command>."""
 
 import logging
+import os
 from typing import Annotated
 
 import typer
@@ -59,16 +60,25 @@ def refresh():
     """Weekly update: latest stats, injury reports and lines -> features -> picks."""
     from src.analysis import archetype_report
     from src.archetypes import pipeline
+    from src.config import DATA
     from src.features import player
     from src.ingest import nflverse
     from src.models import train as t
 
-    nflverse.run()  # completed seasons stay cached; the current season is re-pulled
-    player.build()
-    pipeline.run()
-    for pos in pipeline.SPECS:
-        archetype_report.build(pos)
-    t.run(evaluate=False)
+    # Mark the run so an open dashboard shows "getting the latest data" instead of reading
+    # a half-written database (the dashboard's own button writes the same file).
+    pid_file = DATA / "refresh.pid"
+    pid_file.write_text(str(os.getpid()))
+    try:
+        nflverse.run()  # completed seasons stay cached; the current season is re-pulled
+        player.build()
+        pipeline.run()
+        for pos in pipeline.SPECS:
+            archetype_report.build(pos)
+        t.run(evaluate=False)
+    finally:
+        if pid_file.exists() and pid_file.read_text().strip() == str(os.getpid()):
+            pid_file.unlink()
 
 
 if __name__ == "__main__":
