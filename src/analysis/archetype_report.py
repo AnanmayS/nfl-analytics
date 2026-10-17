@@ -19,6 +19,11 @@ LABELS = {
     "goal_line_share": "Goal-line share", "time_to_throw": "Time to throw",
     "scramble_rate": "Scramble rate", "cpoe": "CPOE", "sack_rate": "Sack rate",
     "epa_per_dropback": "EPA/dropback", "deep_pass_rate": "Deep pass rate",
+    "pass_epa_allowed": "Pass EPA allowed", "rush_epa_allowed": "Rush EPA allowed",
+    "pressure_rate": "Pressure rate", "blitz_rate": "Blitz rate",
+    "heavy_box_rel": "8+ box rate (vs. league)", "adot_allowed": "aDOT allowed",
+    "explosive_rate_allowed": "Explosive plays allowed", "takeaway_rate": "Takeaway rate",
+    "third_down_rate_allowed": "3rd-down conv. allowed", "cpoe_allowed": "CPOE allowed",
 }
 
 

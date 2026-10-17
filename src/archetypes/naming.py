@@ -34,6 +34,19 @@ RUSHING: Descriptors = {
     "target_share": ("Pass-Catcher", "Two-Down Back", 3),
 }
 
+DEFENSE: Descriptors = {
+    "blitz_rate": ("Blitz-Heavy", "Four-Man-Rush", 0),
+    "heavy_box_rel": ("Box-Stacking", "Light-Box", 0),
+    "adot_allowed": ("Tight-Underneath", "Keep-It-In-Front", 0),
+    "pressure_rate": ("Pass-Rushing", "Low-Pressure", 1),
+    "takeaway_rate": ("Ball-Hawking", None, 1),
+    "rush_epa_allowed": ("Run-Vulnerable", "Run-Stuffing", 1),
+    "pass_epa_allowed": ("Pass-Vulnerable", "Lockdown", 1),
+    "explosive_rate_allowed": ("Big-Play-Prone", "No-Big-Plays", 1),
+    "third_down_rate_allowed": ("Third-Down-Leaky", "Third-Down-Stout", 1),
+    "cpoe_allowed": ("Soft-Coverage", "Sticky-Coverage", 1),
+}
+
 PASSING: Descriptors = {
     "adot": ("Aggressive", "Conservative", 0),
     "deep_pass_rate": ("Vertical", "Short-Area", 1),
@@ -67,7 +80,8 @@ def compose(terms: list[tuple[str, int]], n: int) -> str:
 
 
 def name_clusters(
-    Z: np.ndarray, labels: np.ndarray, features: list[str], descriptors: Descriptors = RECEIVING
+    Z: np.ndarray, labels: np.ndarray, features: list[str], descriptors: Descriptors = RECEIVING,
+    suffix: str = "",
 ) -> dict[int, str]:
     """Map cluster id -> unique name. Noise (-1) is left out."""
     ids = sorted(int(c) for c in set(labels) if c >= 0)
@@ -86,4 +100,4 @@ def name_clusters(
         seen[names[c]] = seen.get(names[c], 0) + 1
         if seen[names[c]] > 1:
             names[c] = f"{names[c]} {seen[names[c]]}"
-    return names
+    return {c: f"{n} {suffix}" if suffix else n for c, n in names.items()}

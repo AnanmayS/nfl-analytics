@@ -17,9 +17,17 @@ from sklearn.metrics import adjusted_rand_score, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
-from src.archetypes.naming import PASSING, RECEIVING, RUSHING, Descriptors, name_clusters
+from src.archetypes.naming import (
+    DEFENSE,
+    PASSING,
+    RECEIVING,
+    RUSHING,
+    Descriptors,
+    name_clusters,
+)
 from src.config import OUT
 from src.db import connect
+from src.features.defense import DEFENSE_FEATURES
 from src.features.passing import PASSING_FEATURES
 from src.features.receiving import RECEIVING_FEATURES
 from src.features.rushing import RUSHING_FEATURES
@@ -41,6 +49,8 @@ class PositionSpec:
     gmm_k: range = field(default_factory=lambda: range(3, 10))
     min_k: int = 4  # fewest archetypes worth naming
     first_season: int = 2016  # earliest season with every feature populated
+    name_suffix: str = ""  # appended to every archetype name, e.g. "Defense"
+    min_floor: int = 10  # smallest volume accepted for an in-progress season
     hdbscan_sizes: tuple[int, ...] = (15, 25, 40)
 
 
@@ -52,6 +62,10 @@ SPECS: dict[str, PositionSpec] = {
                        first_season=2018),
     "QB": PositionSpec("QB", "feat_passing", "dropbacks", 200, PASSING_FEATURES, PASSING,
                        hdbscan_sizes=(8, 12, 20)),
+    # Whole-team defenses (one row per team-season), volume = games played
+    "DEF": PositionSpec("DEF", "feat_defense", "games", 12, DEFENSE_FEATURES, DEFENSE,
+                        gmm_k=range(3, 9), hdbscan_sizes=(8, 12, 20), name_suffix="Defense",
+                        min_floor=3),
 }
 
 
@@ -67,7 +81,7 @@ def season_progress(con) -> tuple[int, float]:
 
 def load_players(con, spec: PositionSpec) -> tuple[pl.DataFrame, int]:
     current, progress = season_progress(con)
-    current_min = max(10, round(spec.min_volume * progress))
+    current_min = max(spec.min_floor, round(spec.min_volume * progress))
     df = con.execute(
         f"""SELECT * FROM {spec.table}
             WHERE position = ? AND season >= ?
@@ -176,7 +190,7 @@ def run_position(con, spec: PositionSpec) -> pl.DataFrame:
     log.info("%s model selection:\n%s", spec.position, sel)
     labels, prob = predict(model, method, E)
 
-    names = name_clusters(Z, labels, spec.features, spec.descriptors)
+    names = name_clusters(Z, labels, spec.features, spec.descriptors, spec.name_suffix)
 
     def frame(base: pl.DataFrame, Zm, XY, lab, pr, projected: bool):
         return base.select(["player_id", "player_name", "season", "team", "position",
