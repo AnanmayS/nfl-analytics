@@ -22,12 +22,22 @@ TEAM_FIX = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
 OFF_METRICS = ["pass_epa", "rush_epa", "success_rate", "early_down_epa", "turnover_rate",
                "pressure_rate"]
 METRICS = [f"off_{m}" for m in OFF_METRICS] + [f"def_{m}" for m in OFF_METRICS]
+# Whole-defense additions: computed for both sides (def_* = what the defense allowed),
+# plus scheme tendencies that only exist for a defense.
+EXTRA_METRICS = ["epa_play", "explosive_rate", "third_down_rate", "cpoe", "adot"]
+SCHEME_METRICS = ["blitz_rate", "heavy_box_rate"]
+# Model candidates. Stacked-box rate is display-only: its source changed in 2024 and the
+# league-wide level dropped by half, which would distort season-to-season priors.
+DEFENSE_EXTRA = [f"def_{m}" for m in EXTRA_METRICS] + ["def_blitz_rate"]
+ALL_METRICS = (METRICS + [f"off_{m}" for m in EXTRA_METRICS] + DEFENSE_EXTRA
+               + ["def_heavy_box_rate"])
 
 TEAM_GAME_SQL = """
 CREATE OR REPLACE TABLE team_game_stats AS
 WITH p AS (
-    SELECT game_id, season, game_date, posteam, defteam, epa, success, pass, rush, down,
-           qb_dropback, sack, qb_hit, interception, fumble_lost
+    SELECT game_id, play_id, season, game_date, posteam, defteam, epa, success, pass, rush,
+           down, qb_dropback, sack, qb_hit, interception, fumble_lost, yards_gained,
+           air_yards, cpoe, third_down_converted, third_down_failed
     FROM {pbp}
     WHERE play_type IN ('pass', 'run') AND epa IS NOT NULL
       AND coalesce(two_point_attempt, 0) = 0 AND posteam IS NOT NULL
@@ -44,13 +54,39 @@ off AS (
            -- pressure proxy: sack or QB hit per dropback (participation pressure data
            -- stops in 2025, so this keeps one definition across all seasons)
            avg(greatest(coalesce(sack, 0), coalesce(qb_hit, 0)))
-               FILTER (WHERE qb_dropback = 1)          AS pressure_rate
+               FILTER (WHERE qb_dropback = 1)          AS pressure_rate,
+           avg(epa)                                    AS epa_play,
+           avg(CASE WHEN (pass = 1 AND yards_gained >= 20) OR (rush = 1 AND yards_gained >= 10)
+                    THEN 1.0 ELSE 0.0 END)             AS explosive_rate,
+           sum(third_down_converted) / nullif(sum(third_down_converted)
+               + sum(third_down_failed), 0)            AS third_down_rate,
+           avg(cpoe)                                   AS cpoe,
+           avg(air_yards) FILTER (WHERE coalesce(sack, 0) = 0) AS adot
     FROM p GROUP BY game_id, season, posteam
+),
+scheme AS (  -- defensive tendencies; participation through 2025, FTN charting after
+    SELECT p.game_id, p.defteam AS team,
+           avg(CASE WHEN coalesce(pa.number_of_pass_rushers, f.n_pass_rushers) >= 5
+                    THEN 1.0 ELSE 0.0 END)
+               FILTER (WHERE p.qb_dropback = 1
+                       AND coalesce(pa.number_of_pass_rushers, f.n_pass_rushers) IS NOT NULL)
+                                                       AS blitz_rate,
+           avg(CASE WHEN coalesce(pa.defenders_in_box, f.n_defense_box) >= 8
+                    THEN 1.0 ELSE 0.0 END)
+               FILTER (WHERE p.down IN (1, 2)
+                       AND coalesce(pa.defenders_in_box, f.n_defense_box) IS NOT NULL)
+                                                       AS heavy_box_rate
+    FROM p
+    LEFT JOIN {participation} pa ON pa.nflverse_game_id = p.game_id AND pa.play_id = p.play_id
+    LEFT JOIN {ftn} f ON f.nflverse_game_id = p.game_id AND f.nflverse_play_id = p.play_id
+    GROUP BY p.game_id, p.defteam
 )
 SELECT o.game_id, o.season, o.game_date, o.team, o.opp, o.plays,
-       {off_cols}, {def_cols}
+       {off_cols}, {def_cols}, s.blitz_rate AS def_blitz_rate,
+       s.heavy_box_rate AS def_heavy_box_rate
 FROM off o
 JOIN off d ON d.game_id = o.game_id AND d.team = o.opp
+LEFT JOIN scheme s ON s.game_id = o.game_id AND s.team = o.team
 """
 
 
@@ -61,11 +97,14 @@ class RollingParams:
     regress: float = 0.5      # share of last season's deviation from league mean kept
 
 
-def build_team_game_stats(con: duckdb.DuckDBPyConnection, pbp: str = "raw_pbp") -> None:
+def build_team_game_stats(con: duckdb.DuckDBPyConnection, pbp: str = "raw_pbp",
+                          participation: str = "raw_participation",
+                          ftn: str = "raw_ftn_charting") -> None:
+    both = OFF_METRICS + EXTRA_METRICS
     con.execute(TEAM_GAME_SQL.format(
-        pbp=pbp,
-        off_cols=", ".join(f"o.{m} AS off_{m}" for m in OFF_METRICS),
-        def_cols=", ".join(f"d.{m} AS def_{m}" for m in OFF_METRICS),
+        pbp=pbp, participation=participation, ftn=ftn,
+        off_cols=", ".join(f"o.{m} AS off_{m}" for m in both),
+        def_cols=", ".join(f"d.{m} AS def_{m}" for m in both),
     ))
 
 
@@ -154,16 +193,16 @@ def build_game_features(con: duckdb.DuckDBPyConnection, p: RollingParams | None 
            FROM raw_schedules"""
     ).pl().with_columns(pl.col("home_team", "away_team").replace(TEAM_FIX))
 
-    priors = season_priors(tg, METRICS, p)
-    state = rolling_state(tg, priors, METRICS, p)
+    priors = season_priors(tg, ALL_METRICS, p)
+    state = rolling_state(tg, priors, ALL_METRICS, p)
     long = pl.concat([
         sched.select("game_id", "season", "game_date", pl.col("home_team").alias("team")),
         sched.select("game_id", "season", "game_date", pl.col("away_team").alias("team")),
     ])
-    feats = pregame_features(long, state, priors, METRICS)
+    feats = pregame_features(long, state, priors, ALL_METRICS)
 
     def side(prefix: str, team_col: str) -> pl.DataFrame:
-        return feats.rename({c: f"{prefix}_{c}" for c in [*METRICS, "games_played"]}).rename(
+        return feats.rename({c: f"{prefix}_{c}" for c in [*ALL_METRICS, "games_played"]}).rename(
             {"team": team_col}).drop("season", "game_date")
 
     out = (
