@@ -11,8 +11,10 @@ from scipy.stats import norm
 
 from src.models.game import SPREAD_SIGMA
 
-# Model shown to fans: the walk-forward logistic model (our best-scoring one).
-MODEL_COL = "p_logit"
+# Model shown to fans: the final pick (stats model blended with the betting line when one
+# is posted, else the stats model alone). STATS_COL is the stats model on its own.
+MODEL_COL = "p_final"
+STATS_COL = "p_logit"
 
 PLAIN_LABELS = {
     # receiving
@@ -102,6 +104,7 @@ def team_games(preds: pl.DataFrame, team: str) -> pl.DataFrame:
         pl.lit(True).alias("is_home"),
         pl.col("away_team").alias("opponent"),
         pl.col(MODEL_COL).alias("win_prob"),
+        pl.col(STATS_COL).alias("stats_win_prob"),
         pl.col("p_vegas").alias("vegas_win_prob"),
         pl.col("spread_line").alias("vegas_spread"),
         pl.col("home_score").alias("points_for"),
@@ -113,6 +116,7 @@ def team_games(preds: pl.DataFrame, team: str) -> pl.DataFrame:
         pl.lit(False).alias("is_home"),
         pl.col("home_team").alias("opponent"),
         (1 - pl.col(MODEL_COL)).alias("win_prob"),
+        (1 - pl.col(STATS_COL)).alias("stats_win_prob"),
         (1 - pl.col("p_vegas")).alias("vegas_win_prob"),
         (-pl.col("spread_line")).alias("vegas_spread"),
         pl.col("away_score").alias("points_for"),
@@ -155,6 +159,7 @@ def league_picks(preds: pl.DataFrame) -> pl.DataFrame:
         "season", "week", "game_date",
         pl.max_horizontal(pl.col(MODEL_COL), 1 - pl.col(MODEL_COL)).alias("model_conf"),
         ((pl.col(MODEL_COL) > 0.5) == home_won).alias("model_correct"),
+        ((pl.col(STATS_COL) > 0.5) == home_won).alias("stats_correct"),
         pl.when(pl.col("spread_line") != 0)
         .then((pl.col("spread_line") > 0) == home_won).alias("vegas_correct"),
     )
@@ -220,7 +225,10 @@ FACTORS: dict[str, tuple[str, int]] = {
     # whole-unit ratings: EPA per play on every snap
     "off_epa_play": ("offense as a whole", 1),
     "def_epa_play": ("defense as a whole", -1),
+    # opponent-adjusted rating (point margin, adjusted for who they played)
+    "margin_rating": ("overall strength adjusted for schedule", 1),
 }
+RATING_INPUTS = ["margin_rating", "net_epa_rating", "net_sr_rating"]
 OVERALL = {"off": "off_epa_play", "def": "def_epa_play"}
 OFF_CORE = ["off_pass_epa", "off_rush_epa", "off_success_rate"]
 DEF_CORE = ["def_pass_epa", "def_rush_epa", "def_success_rate"]
@@ -318,6 +326,13 @@ def game_reasons(game: dict, tiers: pl.DataFrame, names: dict[str, str] | None =
                 if m in FACTORS and consistent(m, f, o):
                     out.append({"favors": f, "push": abs(c), "unit": unit,
                                 "text": line(m, f, o)})
+    # Opponent-adjusted ratings: one line for all three rating inputs.
+    rp = sum(game.get(f"contrib_d_{c}") or 0 for c in RATING_INPUTS)
+    if rp:
+        fav, other = (home, away) if rp > 0 else (away, home)
+        if consistent("margin_rating", fav, other):
+            out.append({"favors": fav, "push": abs(rp), "unit": "rating",
+                        "text": line("margin_rating", fav, other)})
     hf = (game.get("contrib_intercept") or 0) + (game.get("contrib_neutral") or 0) \
         + (game.get("contrib_div_game") or 0)
     if not game.get("neutral") and abs(hf) > 0:  # no home crowd at a neutral site
@@ -384,7 +399,8 @@ def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
         side = "struggling on both sides of the ball"
     else:
         side = "even on both sides of the ball"
-    ranked = sorted(((m, p) for m, p in pcts.items() if m not in OVERALL.values()),
+    ranked = sorted(((m, p) for m, p in pcts.items()
+                     if m not in OVERALL.values() and m != "margin_rating"),
                     key=lambda kv: -kv[1])
     strengths = [f"{FACTORS[m][0]} ({tier(p)})" for m, p in ranked[:2] if p >= 65]
     weak = [f"{FACTORS[m][0]} ({tier(p)})" for m, p in ranked[-1:] if p <= 35]

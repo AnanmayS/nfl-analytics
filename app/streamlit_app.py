@@ -230,9 +230,19 @@ def defense_text(team: str, short: bool = False) -> str:
 
 
 def reasons_html(game: dict) -> str:
-    """'Why we lean X' and 'What Y has going for them' bullets for a game_predictions row."""
+    """The betting line (when posted), then why our stats model leans the way it does."""
     home, away, p = game["home_team"], game["away_team"], game["p_logit"]
     pick, other = (home, away) if p >= 0.5 else (away, home)
+    spread = game.get("spread_line")
+    if spread is not None and game.get("p_blend") is not None:
+        fav = home if spread > 0 else away
+        line_txt = ("Pick'em" if spread == 0 else f"{nick(fav)} favored by {abs(spread):g}")
+        head = (f"<b>The betting line:</b> {line_txt}. Our final number blends the line with "
+                f"our stats model, which on its own gives the {nick(pick)} "
+                f"{max(p, 1 - p):.0%}.<br><br>")
+    else:
+        head = ("<b>No betting line yet</b>, so this pick is our stats model alone. It will "
+                "also factor in the line once one is posted.<br><br>")
     rs = game_reasons(game, tiers(), {t: nick(t) for t in TEAMS})
     pro = [r for r in rs if r["favors"] == pick and r["push"] >= 0.05][:3]
     con = [r for r in rs if r["favors"] == other and r["push"] >= 0.05][:2]
@@ -241,7 +251,7 @@ def reasons_html(game: dict) -> str:
         return "".join(f"<li><span class='pill'>{strength_word(r['push'])}</span> "
                        f"{r['text']}</li>" for r in rows)
 
-    html = f"<b>Why we lean {nick(pick)}</b><ul style='margin:4px 0 8px'>"
+    html = head + f"<b>Why our stats model leans {nick(pick)}</b><ul style='margin:4px 0 8px'>"
     html += items(pro) or "<li>No single big factor; it's close across the board</li>"
     html += "</ul>"
     if con:
@@ -329,7 +339,9 @@ def page_team(team: str) -> None:
      <span class='muted'>· Week {nxt['week']} · {fmt_date(nxt['game_date'])}</span></div>
   <div style='margin-top:10px' class='big'>{p:.0%} chance to win</div>
   {win_bar(team, opp, p)}
-  <div class='muted'>{nick(team)} {p:.0%} · {nick(opp)} {1-p:.0%}</div>
+  <div class='muted'>{nick(team)} {p:.0%} · {nick(opp)} {1-p:.0%} ·
+     {"stats model + betting line" if nxt['vegas_spread'] is not None
+      else "stats model only (no line yet)"}</div>
   <div style='margin-top:8px'><span class='pill'>{confidence_label(p)}</span>
      &nbsp;{verdict} · Vegas: {spread_text(nxt['vegas_spread'], nick(team))}</div>
   <div class='muted' style='margin-top:6px'>The {nick(opp)}: {identity_for(opp)['label']}</div>
@@ -443,7 +455,7 @@ def page_week() -> None:
     games = season.filter(pl.col("week") == week).sort("game_date", "gametime")
     cols = st.columns(2)
     for i, r in enumerate(games.iter_rows(named=True)):
-        home, away, p = r["home_team"], r["away_team"], r["p_logit"]
+        home, away, p = r["home_team"], r["away_team"], r["p_final"]
         fav, fp = (home, p) if p >= 0.5 else (away, 1 - p)
         result = ""
         changes = [f"{nick(t)} start {r[f'{sd}_expected_qb']} (usually "
@@ -490,10 +502,12 @@ def page_track() -> None:
         p = picks.filter(pl.col("season") == yr)
         v = p.filter(pl.col("vegas_correct").is_not_null())
         c.markdown(f"#### {yr}{' (so far)' if yr == CURRENT else ''}")
-        stat(c, "Our model picked the winner", f"{p['model_correct'].mean():.0%}",
+        stat(c, "Our pick won", f"{p['model_correct'].mean():.0%}",
              f"{int(p['model_correct'].sum())} of {p.height} games")
         stat(c, "Vegas favorite won", f"{v['vegas_correct'].mean():.0%}",
              f"{int(v['vegas_correct'].sum())} of {v.height} games")
+        stat(c, "Our stats model alone", f"{p['stats_correct'].mean():.0%}",
+             f"{int(p['stats_correct'].sum())} of {p.height} games")
 
     st.subheader("When we're confident, are we right?")
     cc = confidence_check(picks)
@@ -510,9 +524,11 @@ def page_track() -> None:
     st.caption("If the two bars in a group match, our percentages mean what they say. "
                "Games per group: " + ", ".join(
                    f"{b}: {n}" for b, n in zip(cc["bucket"], cc["games"], strict=True)))
-    st.info("Bottom line: the model is honest about its confidence, but Vegas still picks "
-            "winners more often. Betting lines reflect injuries, news and money that "
-            "play-by-play stats can't see.")
+    st.info("Bottom line: our pick blends our stats model with the betting line, so it picks "
+            "winners as often as Vegas does, and its percentages have been slightly more "
+            "accurate than the line's own. The stats model alone (no betting info) is shown "
+            "for comparison: since 2018 it trails Vegas by about a point, more in the last "
+            "two seasons.")
 
 
 # ------------------------------------------------------------------ player types
