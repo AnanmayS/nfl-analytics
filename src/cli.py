@@ -45,11 +45,30 @@ def archetypes(
 
 
 @app.command()
-def train():
+def train(
+    evaluate: Annotated[bool, typer.Option(help="Also rerun the comparison models.")] = False,
+):
     """Build pre-kickoff game features and run the walk-forward game models."""
     from src.models import train as t
 
-    t.run()
+    t.run(evaluate=evaluate)
+
+
+@app.command()
+def refresh():
+    """Weekly update: latest stats, injury reports and lines -> features -> picks."""
+    from src.analysis import archetype_report
+    from src.archetypes import pipeline
+    from src.features import player
+    from src.ingest import nflverse
+    from src.models import train as t
+
+    nflverse.run()  # completed seasons stay cached; the current season is re-pulled
+    player.build()
+    pipeline.run()
+    for pos in pipeline.SPECS:
+        archetype_report.build(pos)
+    t.run(evaluate=False)
 
 
 if __name__ == "__main__":

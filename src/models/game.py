@@ -53,6 +53,27 @@ def defense_features(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
     ), names
 
 
+AVAILABILITY = ["qb_out", "off_missing", "def_missing"]
+
+
+def add_availability(games: pl.DataFrame, avail: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
+    """Join each side's injury-report features and add home-minus-away differences.
+    Games with no report yet (future weeks) count as nobody missing."""
+    def side(prefix: str) -> pl.DataFrame:
+        return avail.select("game_id", pl.col("team").alias(f"{prefix}_team"),
+                            *[pl.col(c).alias(f"{prefix}_{c}") for c in AVAILABILITY],
+                            pl.col("key_absences").alias(f"{prefix}_key_absences"),
+                            pl.col("starting_qb").alias(f"{prefix}_starting_qb"),
+                            pl.col("report_available").alias(f"{prefix}_report_available"))
+    g = games.join(side("home"), on=["game_id", "home_team"], how="left").join(
+        side("away"), on=["game_id", "away_team"], how="left")
+    names = [f"d_{c}" for c in AVAILABILITY]
+    return g.with_columns(
+        (pl.col(f"home_{c}").fill_null(0.0) - pl.col(f"away_{c}").fill_null(0.0)).alias(f"d_{c}")
+        for c in AVAILABILITY
+    ), names
+
+
 @dataclass
 class ModelSpec:
     name: str
