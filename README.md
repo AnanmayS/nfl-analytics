@@ -14,6 +14,7 @@ make archetypes   # archetype_<pos> tables + data/out/archetypes_<pos>.html repo
 make train        # team features, injury availability, archetype mix, walk-forward models
 make evaluate     # train + comparison models (refreshes the lift tables; ~3x slower)
 make refresh      # weekly update: latest results, injury reports and lines -> new picks
+make schedule     # run refresh automatically Tue + Sat 8 AM (macOS launchd); make unschedule
 make app          # Streamlit dashboard
 make test
 ```
@@ -43,6 +44,14 @@ nflverse updates play-by-play nightly and posts each week's official injury repo
 - again on Friday or Saturday, when final injury reports (Out / Doubtful / Questionable) and fresh betting lines are posted.
 
 The sidebar shows when the data was last updated, which date results run through, and which week's injury reports are loaded.
+
+**Automatic refresh (macOS).** `make schedule` installs a launchd job (`scripts/schedule_refresh.sh`) that runs the refresh every Tuesday and Saturday at 8:00 AM. It needs only the Mac, not the dashboard or a terminal. If the Mac is asleep then, the job runs on wake; if it's shut down, that run is skipped. Output goes to `data/refresh_scheduled.log`. Other commands:
+
+- `scripts/schedule_refresh.sh status` checks whether the job is installed and how its last run ended;
+- `scripts/schedule_refresh.sh run-now` triggers a run immediately;
+- `make unschedule` removes the job.
+
+While any refresh is running, an open dashboard shows a "getting the latest data" screen and reloads by itself when the refresh is done.
 
 ## Dashboard
 
