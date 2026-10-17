@@ -63,7 +63,7 @@ While any refresh is running, an open dashboard shows a "getting the latest data
 - **Player types.** Each archetype described in words, with recent examples. A player lookup shows percentile bars against others at the position; it starts on the selected team's top player.
 - **Under the hood.** The technical views: UMAP map, centroid heatmap, model metrics, calibration and the Part 3 tests.
 
-Fans see the walk-forward logistic model, the best-scoring of ours. The projected margin is derived from its win probability (σ = 13.45), so the two always agree.
+Fans see the **final pick**: the stats model blended with the betting line when one is posted, and the stats model alone otherwise (see "Closing the gap to Vegas"). The projected margin is derived from that win probability (σ = 13.45), so the two always agree. Explanations name the line first, then list what the stats model sees.
 
 **Team identity** (`team_identity` in `src/analysis/fan_view.py`; inputs from `src/analysis/team_profile.py`) combines three things:
 
@@ -157,7 +157,7 @@ Each game's **expected starter** is the schedule's listed starting QB (nflverse 
 
 Four variants were compared walk-forward against the injury-only QB flag. **qb_change + qb_delta** was best on 2018–21 (−0.0041) and on 2022–26 (−0.0049), and is now in the model. Over 2018–26, log loss improves from 0.6400 to 0.6355 (Δ −0.0045, 95% CI −0.0091 to −0.0001); this is the first addition that clears noise. Against a model with no QB information at all (`game_qb_lift`), logistic goes 0.6413 → 0.6354 (95% CI −0.0108 to −0.0007) and XGBoost 0.6492 → 0.6441 (−0.0089 to −0.0013). The pick rate is essentially unchanged: 63.4% → 63.1% over 2,298 games, and 60.9% → 61.7% for 2025–26. Of the 21 games in 2025–26 where the model was confidently wrong and Vegas was right, 8 involved a QB change; the new features get 4 of those 8 right. One caveat: for past games, the listed starter is whoever actually started, which was nearly always announced before kickoff; for upcoming games, it's nflverse's projection.
 
-**Models:** logistic regression (C = 0.1) and an XGBoost classifier for win probability; ridge and an XGBoost regressor for margin. Hyperparameters are fixed, not tuned on the test period.
+**Models:** logistic regression (C = 0.01, chosen on 2018–23) and an XGBoost classifier for win probability; ridge and an XGBoost regressor for margin.
 
 **Validation:** walk-forward by week, 2018 → 2026 week 6. Each week's games are predicted by models fit on every game that kicked off before that week began. 2016 is burn-in (no prior) and 2017 is the first training season.
 
@@ -167,13 +167,52 @@ Four variants were compared walk-forward against the injury-only QB flag. **qb_c
 
 | | Log loss | Brier | Accuracy | Margin MAE |
 |---|---|---|---|---|
-| Logistic | 0.635 | 0.223 | 63.2% | — |
-| XGBoost | 0.644 | 0.226 | 63.0% | — |
-| Ridge margin | — | — | 63.5% | 10.24 |
+| **Final pick (stats + line)** | **0.6115** | **0.212** | **66.1%** | — |
+| Stats model (logistic) | 0.627 | 0.219 | 65.1% | — |
+| XGBoost | 0.640 | 0.224 | 64.0% | — |
+| Ridge margin | — | — | 64.7% | 10.19 |
 | **Closing spread** | **0.612** | **0.212** | **66.1%** | **9.85** |
 | De-vigged moneyline | 0.610 | 0.211 | 66.3% | — |
 
-The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.43 logistic, 0.54 XGBoost). The fitted Vegas coefficient of ~1.15 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
+The stats-only models are well calibrated but trail the market. In 2024 the stats model matched Vegas's pick rate (70.5%) and beat its log loss, but over 2018–26 it trails by about a point. A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_stats)` finds no meaningful information beyond the closing spread (p = 0.74). The fitted Vegas coefficient of ~1.15 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
+
+### Closing the gap to Vegas
+
+The goal was to match the Vegas favorite's pick rate (66.1% over 2018–26). To avoid tuning to the test set, every idea was tried on **2018–23 only**; **2024–26 was held out** and scored once at the end. Changes in pick rate of about ±1 point (≈23 games) are within noise, so log loss decided close calls.
+
+| Step (dev 2018–23: Vegas 65.5% / 0.613) | Dev picks | Dev log loss |
+|---|---|---|
+| Starting model | 62.97% | 0.6425 |
+| + opponent-adjusted ratings (200-day memory) | 64.79% | 0.6388 |
+| + stronger regularization (C 0.1 → 0.01) | 65.03% | 0.6328 |
+| + success-rate rating, margins capped at ±21 | 65.09% | 0.6316 |
+| Tried and dropped: shorter rating memory (50–75 days), lean feature sets, home-field trend terms, a second short-memory rating, ridge/XGBoost blends | ≤ 64.8% | ≥ 0.634 |
+
+**Opponent-adjusted ratings** (`src/features/ratings.py`, `team_ratings`). Each week, weighted ridge regressions are refit on games before that week, with older games decaying over a 200-day half-life:
+
+- a **margin rating**: schedule-adjusted point differential, like SRS, with margins capped at ±21;
+- **offense and defense ratings** from EPA per play;
+- **offense and defense ratings** from success rate.
+
+Raw rolling stats count a big game against a weak opponent the same as one against a strong opponent; these ratings don't. On their own they improve log loss from 0.6320 to 0.6270 (95% CI −0.0092 to −0.0004; `game_ratings_lift`).
+
+**Held out, 2024–26 (648 games):**
+
+| | Picks | Log loss |
+|---|---|---|
+| Starting model | 63.89% | 0.6175 |
+| **Stats model (all of the above)** | **64.97%** | **0.6152** |
+| Vegas | 67.59% | 0.6084 |
+
+The stats model improved on held-out seasons but stayed behind Vegas, which was unusually sharp in 2024–26. The last step adds the market itself. **Stats + line blend** (`market_blend` in `src/models/game.py`): each week, a two-input logistic regression on logit(stats model) and logit(Vegas) is fit on earlier games only, using the stats model's own out-of-sample predictions.
+
+| | Picks, 2018–26 | Log loss, 2018–26 | Picks, holdout | Log loss, holdout |
+|---|---|---|---|---|
+| Stats model | 65.06% | 0.6270 | 64.97% | 0.6152 |
+| **Final pick: stats + line** | **66.10%** | **0.6115** | **67.59%** | **0.6052** |
+| Vegas favorite / spread | 66.10% | 0.6117 | 67.59% | 0.6084 |
+
+The final pick **ties Vegas's pick rate** and is **slightly better calibrated**, clearly so on the holdout (0.6052 vs. 0.6084). Be clear about why: the learned weights are about 1.19 on the line and 0.04 on the stats model. The blend mostly corrects the spread-to-probability conversion, which is a little timid for this era (σ = 13.45), rather than adding new information. With no line posted (games more than a week or two out), the pick is the stats model alone.
 
 ## Part 3 — Archetype mix → team efficiency
 
@@ -218,7 +257,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 
 ## Leakage safeguards and tests
 
-`make test` runs 41 tests:
+`make test` runs 44 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -230,6 +269,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
   - the exponential weights match a hand calculation.
 - **Injury availability** (`test_availability.py`): roles come only from earlier games, statuses map to sit chances, a long absence already reflected in recent snaps isn't counted again, and relocated team codes are normalized.
 - **Starting QB** (`test_quarterbacks.py`): ratings use only earlier games and decay old seasons; a new or unknown QB rates at replacement level; a listed starter wins; injured reserve or an Out listing falls back to the backup.
+- **Ratings and blend** (`test_ratings_blend.py`): ratings recover the true team order, don't move when games on or after the week start are changed, and the blend produces nothing for games without a line.
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
@@ -245,4 +285,5 @@ The walk-forward loop trains only on `game_date < week_start`. Archetype project
 - **Injury reports** use fixed sit chances (Out 1.0, Doubtful 0.9, Questionable 0.2) and can't see late scratches or players who aren't on the report. Reports pulled mid-week are incomplete, so refresh again after Friday's final report. The model uses only the QB features. "Starters missing" counts are shown on the dashboard but didn't improve predictions.
 - **QB ratings** are a single number (shrunken EPA per dropback). They don't capture scheme fit, the supporting cast, or how a backup has looked in practice. Games more than a week or two out have no listed starter yet and fall back to roster and injury status.
 - **The game model omits** weather and travel. Its week-1 rosters are last season's (no free agency or draft). Hyperparameters are untuned defaults.
-- **Vegas efficiency.** The closing line already prices everything here and more. Beating it would take information the market lacks, not a better summary of public play-by-play.
+- **Vegas efficiency.** The closing line already prices everything here and more. The final pick matches Vegas's pick rate by leaning on the line; the stats model alone is about a point behind over 2018–26. Beating Vegas on picks would take information the market lacks, not a better summary of public play-by-play.
+- **The blend uses the line available at refresh time.** For past games that's the closing spread; for upcoming games it's the current line, which can still move.
