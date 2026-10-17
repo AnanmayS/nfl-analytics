@@ -51,7 +51,9 @@ Fans see the walk-forward logistic model, the best-scoring of ours. The projecte
 - **Which side carries the team:** the average league percentile of the core offensive metrics compared with the core defensive ones.
 - **Standouts:** the two best and the single worst rolling metrics, and the archetypes of the most-used QB, RB, WRs and TE.
 
-**Why we lean a team.** The logistic model is a weighted sum, so each prediction splits exactly into per-factor pushes (`contrib_*` columns in `game_predictions`, taken from that week's walk-forward fit). The biggest pushes are shown as sentences that compare the two teams' league standing on that factor, e.g. "Patriots' passing offense (one of the league's best) vs. Jets' (below average)". A factor is shown only when the favored team really is better on it, and home field is left out for neutral-site games. These reasons describe the model's math; archetypes appear in the identity card but don't drive this model.
+**Why we lean a team.** The logistic model is a weighted sum, so each prediction splits exactly into per-factor pushes (`contrib_*` columns in `game_predictions`, taken from that week's walk-forward fit). The biggest pushes are shown as sentences that compare the two teams' league standing on that factor, e.g. "Patriots' passing offense (one of the league's best) vs. Jets' (below average)". A factor is shown only when the favored team really is better on it, and home field is left out for neutral-site games. All of a unit's factors are summed into one line, e.g. "Jets' defense as a whole (one of the league's best) vs. Patriots' (below average); biggest gap: run defense". This uses EPA per play allowed on every snap as the whole-unit rating, and the line appears only when that rating agrees with the direction of the push. Otherwise the individual factors are listed. These reasons describe the model's math; player archetypes appear in the identity card but don't drive this model.
+
+**Defense in the identity card** shows the defense's archetype, built from this season's stats so far, separately from its recent-form rating (rolling, blended with last season). It also names its best and weakest areas. Every game card compares the two defenses.
 
 ## Data
 
@@ -63,6 +65,7 @@ Fans see the walk-forward logistic model, the best-scoring of ours. The projecte
 
 - **WR/TE** (≥50 / ≥40 targets): aDOT, target share and air-yards share (denominators use only games the player appeared in), YAC over expected (pbp `xyac`), NGS average separation, middle-of-field target rate, red-zone target share, catch rate over expected (`complete − cp`), EPA/target.
 - **RB** (≥100 touches): rush EPA/att, NGS RYOE/att, target share, route participation, explosive run rate (10+ yds), goal-line carry share (inside the 5).
+- **Team defenses** (whole team-seasons, `src/features/defense.py`): pass and run EPA allowed, pressure rate, blitz rate, stacked-box rate (vs. that season's league average), throw depth allowed, explosive plays allowed, takeaway rate, third-down rate allowed, completion % over expected allowed. 2026 defenses are projected after 3+ games.
 - **QB** (≥200 dropbacks): aDOT, NGS time to throw, scramble rate, CPOE, sack rate, EPA/dropback (`qb_epa`), deep-pass rate (20+ air yards).
 
 **Pipeline:**
@@ -83,6 +86,7 @@ Output: `archetype_<pos>` (player, season, team, archetype, membership probabili
 | WR | 4 | 0.92 | 0.13 | Deep Low-Catch (235) — Evans '18, McLaurin '23 · Sure-Handed Efficient (228) — Hill '22, Landry '17 · Red-Zone Alpha (200) — Kupp '21, M. Thomas '19, Chase '25 · Underneath Complement (187) — Godwin '22, Tate '17 |
 | TE | 7 | 0.69 | 0.09 | Red-Zone Efficient Alpha (47) — McBride '25, Bowers '24 · Red-Zone Middle-Field Alpha (48) — Ertz '19, Kelce '24 · Sure-Handed Efficient (63) · Separator Complement (64) · Middle-Field Complement (49) · Deep Contested (45) — Graham '18, Gesicki '19 · Underneath Perimeter (34) |
 | RB | 7 | 0.89 | 0.14 | Every-Down Pass-Catcher (80) — McCaffrey '19/'25 · Goal-Line Back (82) — Henry '22, Jacobs '24 · Elusive Efficient (68) — Henry '20, Barkley '24 · Explosive Pass-Catcher (40) — Cook '23, Hall '25 · Two-Down Back (59) — Peterson '18 · Inefficient Pass-Catcher (66) · Inefficient Two-Down Back (36) |
+| DEF | 4 | 0.84 | 0.11 | Lockdown Sticky-Coverage Defense (80) · Keep-It-In-Front No-Big-Plays Defense (73) · Tight-Underneath Big-Play-Prone Defense (94) · Pass-Vulnerable Third-Down-Leaky Defense (73) |
 | QB | 5 | 0.71 | 0.12 | Efficient Sack-Avoiding (58) — Mahomes '21/'22, Allen '21 · Conservative Accurate (83) — Brady '21/'22, Burrow '24 · Hold-the-Ball Scrambler (67) — Wilson '20, C. Williams '24 · Quick-Release Pocket Passer (98) — Cousins '22 · Inefficient Erratic (57) — Howell '23, Young '23 |
 
 Membership is confident (mean max-posterior 0.97–0.99). Silhouettes in the original feature space are low (0.09–0.14), though. **Player roles form a continuum.** The archetypes are a useful, reproducible partition of that continuum, not natural species.
@@ -93,13 +97,27 @@ Membership is confident (mean max-posterior 0.97–0.99). Silhouettes in the ori
 
 **Team-game stats** (all games, from pbp): offensive and defensive EPA/play split by pass and run, success rate, early-down EPA, turnover rate, and pressure rate (sack or QB hit per dropback). Participation pressure data stops in 2025, so this proxy keeps one definition across seasons.
 
+**Whole-defense stats** (what each defense allowed or did):
+
+- Overall EPA/play allowed.
+- Explosive plays allowed (runs of 10+ yards, passes of 20+).
+- Third-down conversion rate allowed.
+- Completion % over expected allowed.
+- Opponents' average throw depth.
+- Blitz rate (5+ pass rushers).
+- Stacked-box rate (8+ defenders in the box).
+
+Blitz and box counts come from participation data through 2025 and FTN charting for 2026; the two sources are identical for 2023–25. The stacked-box rate's league level halves in 2024 when the source changes. It is therefore used only for display, where teams are compared within the same week, and for defense archetypes, as a deviation from that season's league average.
+
 **Rolling, strictly pre-kickoff features** (`src/features/team.py`):
 
 - Within a season, each metric is an exponentially weighted mean of prior games (half-life 5 games).
 - The **prior** is last season's team mean regressed 50% toward last season's league mean. It enters as 4 pseudo-games that decay like any other game, so week 1 is pure prior and the prior fades as games accrue.
 - A game's feature is the as-of state from the team's last game **strictly before** its kickoff date. Unplayed future games get the latest state.
 
-**Model inputs:** home-minus-away differences of all 12 metrics, rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
+**Model inputs:** home-minus-away differences of the 12 core metrics plus the 6 whole-defense stats (everything above except the stacked-box rate), rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
+
+The whole-defense stats were tested before being added: decided on 2018–21 and confirmed on 2022–26, with results stored in `game_defense_lift`. They leave the logistic model unchanged (log loss 0.6413 → 0.6413, CI ±0.004) and nudge XGBoost (0.6524 → 0.6492, Δ −0.003, CI −0.008 to +0.002). Since they cost nothing in accuracy, they're kept so the explanations can cite defense as a whole.
 
 **Models:** logistic regression (C = 0.1) and an XGBoost classifier for win probability; ridge and an XGBoost regressor for margin. Hyperparameters are fixed, not tuned on the test period.
 
@@ -111,13 +129,13 @@ Membership is confident (mean max-posterior 0.97–0.99). Silhouettes in the ori
 
 | | Log loss | Brier | Accuracy | Margin MAE |
 |---|---|---|---|---|
-| Logistic | 0.641 | 0.225 | 63.5% | — |
-| XGBoost | 0.652 | 0.230 | 62.1% | — |
-| Ridge margin | — | — | 63.5% | 10.26 |
+| Logistic | 0.641 | 0.225 | 63.4% | — |
+| XGBoost | 0.649 | 0.229 | 62.2% | — |
+| Ridge margin | — | — | 63.4% | 10.27 |
 | **Closing spread** | **0.612** | **0.212** | **66.1%** | **9.85** |
 | De-vigged moneyline | 0.610 | 0.211 | 66.3% | — |
 
-The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.89 logistic, 0.74 XGBoost). The fitted Vegas coefficient of ~1.2 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
+The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.83 logistic, 0.76 XGBoost). The fitted Vegas coefficient of ~1.2 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
 
 ## Part 3 — Archetype mix → team efficiency
 
@@ -153,12 +171,12 @@ Paired bootstrap over games (95% CI):
 
 | Model | Base | + mix | Δ (95% CI) |
 |---|---|---|---|
-| Logistic, log loss | 0.641 | 0.656 | +0.015 (+0.005, +0.025), worse |
-| XGBoost, log loss | 0.652 | 0.646 | −0.006 (−0.012, −0.000), marginally better |
-| Ridge, margin MAE | 10.26 | 10.49 | +0.23 (+0.11, +0.35), worse |
-| XGBoost, margin MAE | 10.40 | 10.34 | −0.06 (−0.15, +0.02), n.s. |
+| Logistic, log loss | 0.641 | 0.657 | +0.016 (+0.006, +0.026), worse |
+| XGBoost, log loss | 0.649 | 0.646 | −0.003 (−0.009, +0.002), n.s. |
+| Ridge, margin MAE | 10.27 | 10.53 | +0.25 (+0.13, +0.38), worse |
+| XGBoost, margin MAE | 10.38 | 10.35 | −0.03 (−0.12, +0.04), n.s. |
 
-The 46 mix columns overfit the linear models. XGBoost extracts a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.31).
+The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.33).
 
 ## Leakage safeguards and tests
 
@@ -182,6 +200,7 @@ The walk-forward loop trains only on `game_date < week_start`. Archetype project
 - **Small samples.** ~35 qualifying QBs and ~55 RBs per season; TE clustering (n = 350) is the least stable (ARI 0.69). Partial-season (2026) projections rest on ~6 games.
 - **Coverage gaps.** RB archetypes start in 2018 because NGS rush yards over expected does. Route participation for 2026 is imputed because participation data isn't out yet.
 - **Proxies.** Pressure is sack-or-hit; route participation is "on field for a dropback".
+- **Defensive scheme data.** Man/zone coverage exists only for 2018–25, so it's left out of the defense archetypes. Blitz and box counts switch sources in 2023 and 2026 (participation → FTN charting).
 - **Archetypes include efficiency** (by choice), which muddies "beyond talent" tests. The style-only toggle exists for a cleaner Part 3.
 - **The game model omits** QB injuries and changes, weather and travel. Its week-1 rosters are last season's (no free agency or draft). Hyperparameters are untuned defaults.
 - **Vegas efficiency.** The closing line already prices everything here and more. Beating it would take information the market lacks, not a better summary of public play-by-play.
