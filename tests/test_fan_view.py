@@ -133,3 +133,28 @@ def test_team_identity_labels():
     assert ident["strengths"][0] == "pass defense (one of the league's best)"
     assert ident["weakness"] == ["pass rush (below average)"]
     assert ident["players"] == ["QB A (Conservative Accurate)", "WR B"]
+
+
+def test_defense_as_a_whole_reason():
+    from src.analysis.fan_view import game_reasons
+    # DEN's defense is better overall and on the run; KC's pass rush is better
+    t = _tiers({"def_epa_play": 0.10, "def_rush_epa": 0.10, "def_pressure_rate": 0.40},
+               {"def_epa_play": -0.10, "def_rush_epa": -0.15, "def_pressure_rate": 0.10})
+    game = {"season": 2026, "week": 5, "home_team": "KC", "away_team": "DEN",
+            "contrib_d_def_rush_epa": -0.30, "contrib_d_def_pressure_rate": 0.05,
+            "contrib_d_def_blitz_rate": -0.02, "neutral": 1}
+    r = game_reasons(game, t, {"KC": "Chiefs", "DEN": "Broncos"})
+    assert len(r) == 1  # one line for the whole defense, not three
+    assert r[0]["favors"] == "DEN" and r[0]["push"] == pytest.approx(0.27)
+    assert r[0]["text"] == ("Broncos' defense as a whole (one of the league's best) vs. "
+                            "Chiefs' (one of the league's worst); biggest gap: run defense")
+
+
+def test_identity_reports_defense():
+    from src.analysis.fan_view import team_identity
+    ident = team_identity({"def_epa_play": 85, "off_epa_play": 40, "def_pass_epa": 90,
+                           "def_rush_epa": 50}, 0.5, [], "Lockdown Sticky-Coverage Defense")
+    assert ident["label"] == "Balanced play-calling, carried by its defense"
+    assert ident["defense"] == {"type": "Lockdown Sticky-Coverage Defense",
+                                "overall": "one of the league's best", "best_at": "pass defense",
+                                "worst_at": "run defense"}

@@ -36,7 +36,7 @@ from src.config import DB_PATH  # noqa: E402
 st.set_page_config(page_title="NFL Game Predictions", page_icon="🏈", layout="wide")
 PALETTE = px.colors.qualitative.Set2 + px.colors.qualitative.Dark2
 POS_NAMES = {"QB": "Quarterbacks", "RB": "Running backs", "WR": "Wide receivers",
-             "TE": "Tight ends"}
+             "TE": "Tight ends", "DEF": "Team defenses"}
 
 st.markdown("""
 <style>
@@ -133,7 +133,24 @@ def identity_for(team: str) -> dict:
     prr = prof["pass_rate_pct"][-1] if prof.height else None
     kp = q("SELECT * FROM team_key_players").filter(pl.col("team") == team)
     kp = kp.filter(pl.col("season") == kp["season"].max()).sort("pos", "rk")
-    return team_identity(pcts, prr, kp.to_dicts())
+    dtype = None
+    if "archetype_def" in have:
+        d = q("SELECT team, season, archetype FROM archetype_def").filter(
+            (pl.col("team") == team) & (pl.col("season") <= CURRENT)).sort("season")
+        dtype = d["archetype"][-1] if d.height else None
+    return team_identity(pcts, prr, kp.to_dicts(), dtype)
+
+
+def defense_text(team: str, short: bool = False) -> str:
+    """Defense style (this season's stats so far) and recent form (rolling, vs. league)."""
+    d = identity_for(team)["defense"]
+    if short:
+        style = f"{d['type']} · " if d["type"] else ""
+        return f"{style}{d['overall']} on recent form"
+    style = f"Style this season: {d['type']}. " if d["type"] else ""
+    best = f", best at {d['best_at']}" if d["best_at"] else ""
+    worst = f", weakest at {d['worst_at']}" if d["worst_at"] else ""
+    return f"{style}Recent form: {d['overall']} overall{best}{worst}."
 
 
 def reasons_html(game: dict) -> str:
@@ -169,7 +186,8 @@ with st.sidebar:
     st.query_params["team"] = team
     st.image(logo(team), width=90)
     page = st.radio("Go to", ["My team", "This week", "Track record", "Player types",
-                              "Under the hood"], label_visibility="collapsed")
+                              "Under the hood"], label_visibility="collapsed",
+                    format_func=lambda x: "Player & defense types" if x == "Player types" else x)
     st.caption("Every prediction comes from a model trained only on games played before "
                f"that week. Results through {last_played:%b %-d, %Y}.")
 
@@ -194,11 +212,12 @@ def page_team(team: str) -> None:
 <div class='card'><div class='muted'>Team identity</div>
   <div style='font-size:1.25rem;font-weight:700;margin:2px 0 6px'>{ident['label']}</div>
   <div>Best at: {best}.{weak}</div>
+  <div style='margin-top:6px'><b>Defense:</b> {defense_text(team)}</div>
   <div class='muted' style='margin-top:6px'>Key players: {' · '.join(ident['players'])}</div>
 </div>""", unsafe_allow_html=True)
     st.caption("Based on recent form compared with the rest of the league, how often they "
-               "pass on early downs in close games, and the player types of their most-used "
-               "players.")
+               "pass on early downs in close games, their defensive style, and the player "
+               "types of their most-used players.")
 
     upcoming = season.filter(pl.col("status") == "upcoming")
     if upcoming.height:
@@ -224,6 +243,8 @@ def page_team(team: str) -> None:
   <div style='margin-top:8px'><span class='pill'>{confidence_label(p)}</span>
      &nbsp;{verdict} · Vegas: {spread_text(nxt['vegas_spread'], nick(team))}</div>
   <div class='muted' style='margin-top:6px'>The {nick(opp)}: {identity_for(opp)['label']}</div>
+  <div style='margin-top:6px'><b>Defenses</b><br>{nick(team)}: {defense_text(team, True)}<br>
+     {nick(opp)}: {defense_text(opp, True)}</div>
   <hr style='margin:10px 0;opacity:.3'>
   {reasons_html(preds.filter(pl.col('game_id') == nxt['game_id']).row(0, named=True))}
 </div>""", unsafe_allow_html=True)
@@ -354,7 +375,9 @@ def page_week() -> None:
         with cols[i % 2].expander("Why this pick?"):
             st.markdown(f"""
 <div class='muted'>{nick(away)}: {identity_for(away)['label']}<br>
-{nick(home)}: {identity_for(home)['label']}</div><div style='margin-top:8px'></div>
+{nick(home)}: {identity_for(home)['label']}</div>
+<div style='margin-top:6px'><b>Defenses</b><br>{nick(away)}: {defense_text(away, True)}<br>
+{nick(home)}: {defense_text(home, True)}</div><div style='margin-top:8px'></div>
 {reasons_html(r)}""", unsafe_allow_html=True)
 
 
@@ -396,9 +419,10 @@ def page_track() -> None:
 
 # ------------------------------------------------------------------ player types
 def page_players() -> None:
-    st.title("Player types")
+    st.title("Player & defense types")
     st.write("We grouped players by *how* they play: where they get the ball, how they move "
-             "the offense and how efficient they are. Pick a position to see the types.")
+             "the offense and how efficient they are. Team defenses are grouped the same way "
+             "by how they rush the passer, cover and stop the run. Pick one to see the types.")
     pos = st.radio("Position", list(POS_NAMES), format_func=POS_NAMES.get, horizontal=True,
                    label_visibility="collapsed")
     spec = SPECS[pos]
@@ -432,7 +456,7 @@ def page_players() -> None:
     ordered = ranked.sort(["season", vol], descending=True)
     options = ordered["key"].to_list()
     mine = ordered.filter(pl.col("team") == team)["key"].to_list()  # selected team first
-    chosen = st.multiselect("Choose one or two player-seasons", options,
+    chosen = st.multiselect("Choose one or two to compare", options,
                             default=(mine or options)[:1], max_selections=2)
     if not chosen:
         return
@@ -452,8 +476,8 @@ def page_players() -> None:
     fig.update_layout(legend={"orientation": "h", "y": -0.15, "title": ""},
                       yaxis={"autorange": "reversed"}, margin={"t": 30})
     st.plotly_chart(fig, width="stretch")
-    st.caption("A bar at 80 means the player is higher than 80% of qualifying players at the "
-               "position since 2016. Higher isn't always better (e.g. sacks taken).")
+    st.caption("A bar at 80 means higher than 80% of the comparison group since 2016. "
+               "Higher isn't always better (e.g. sacks taken, big plays allowed).")
 
 
 # ------------------------------------------------------------------ under the hood

@@ -38,6 +38,17 @@ PLAIN_LABELS = {
     "sack_rate": "Sacks taken",
     "epa_per_dropback": "Value added per dropback",
     "deep_pass_rate": "Deep throws (20+ yards)",
+    # team defense
+    "pass_epa_allowed": "Damage allowed per pass",
+    "rush_epa_allowed": "Damage allowed per run",
+    "pressure_rate": "Pressure on the quarterback",
+    "blitz_rate": "Blitzing (5+ rushers)",
+    "heavy_box_rel": "Stacking the box (8+ defenders)",
+    "adot_allowed": "How deep opponents throw",
+    "explosive_rate_allowed": "Big plays allowed",
+    "takeaway_rate": "Takeaways",
+    "third_down_rate_allowed": "Third downs allowed",
+    "cpoe_allowed": "Completions allowed vs. expected",
 }
 QB_LABEL_OVERRIDES = {"adot": "Average throw depth"}
 
@@ -203,7 +214,14 @@ FACTORS: dict[str, tuple[str, int]] = {
     "def_early_down_epa": ("early-down defense", -1),
     "def_turnover_rate": ("takeaways", 1),
     "def_pressure_rate": ("pass rush", 1),
+    "def_explosive_rate": ("big-play prevention", -1),
+    "def_third_down_rate": ("third-down defense", -1),
+    "def_cpoe": ("pass coverage", -1),
+    # whole-unit ratings: EPA per play on every snap
+    "off_epa_play": ("offense as a whole", 1),
+    "def_epa_play": ("defense as a whole", -1),
 }
+OVERALL = {"off": "off_epa_play", "def": "def_epa_play"}
 OFF_CORE = ["off_pass_epa", "off_rush_epa", "off_success_rate"]
 DEF_CORE = ["def_pass_epa", "def_rush_epa", "def_success_rate"]
 
@@ -267,17 +285,39 @@ def game_reasons(game: dict, tiers: pl.DataFrame, names: dict[str, str] | None =
     home, away = game["home_team"], game["away_team"]
     nm = {t: names.get(t, t) for t in (home, away)}
     pct = {t: team_pcts(tiers, game["season"], game["week"], t) for t in (home, away)}
+
+    def line(m: str, fav: str, other: str) -> str:
+        return (f"{nm[fav]}' {FACTORS[m][0]} ({tier(pct[fav][m])}) vs. {nm[other]}' "
+                f"({tier(pct[other][m])})")
+
+    def consistent(m: str, fav: str, other: str) -> bool:
+        return m in pct[fav] and m in pct[other] and pct[fav][m] > pct[other][m]
+
     out = []
-    for m, (label, _) in FACTORS.items():
-        c = game.get(f"contrib_d_{m}")
-        if c is None or m not in pct[home] or m not in pct[away]:
+    for unit in ("off", "def"):
+        # Every model input for this unit, incl. style ones with no "better" direction.
+        pushes = {k[len("contrib_d_"):]: v for k, v in game.items()
+                  if k.startswith(f"contrib_d_{unit}_") and v is not None}
+        total = sum(pushes.values())
+        if not pushes or total == 0:
             continue
-        fav, other = (home, away) if c > 0 else (away, home)
-        if pct[fav][m] <= pct[other][m]:
-            continue
-        out.append({"favors": fav, "push": abs(c), "text":
-                    f"{nm[fav]}' {label} ({tier(pct[fav][m])}) vs. {nm[other]}' "
-                    f"({tier(pct[other][m])})"})
+        fav, other = (home, away) if total > 0 else (away, home)
+        sign = 1 if fav == home else -1
+        parts = sorted(((m, sign * v) for m, v in pushes.items()
+                        if m in FACTORS and m != OVERALL[unit] and sign * v > 0
+                        and consistent(m, fav, other)), key=lambda x: -x[1])
+        if consistent(OVERALL[unit], fav, other):
+            # One line for the whole unit, naming its biggest single piece.
+            detail = f"; biggest gap: {FACTORS[parts[0][0]][0]}" if parts else ""
+            out.append({"favors": fav, "push": abs(total), "unit": unit,
+                        "text": line(OVERALL[unit], fav, other) + detail})
+        else:
+            # Units net out the other way overall: list the specific pieces instead.
+            for m, c in pushes.items():
+                f, o = (home, away) if c > 0 else (away, home)
+                if m in FACTORS and consistent(m, f, o):
+                    out.append({"favors": f, "push": abs(c), "unit": unit,
+                                "text": line(m, f, o)})
     hf = (game.get("contrib_intercept") or 0) + (game.get("contrib_neutral") or 0) \
         + (game.get("contrib_div_game") or 0)
     if not game.get("neutral") and abs(hf) > 0:  # no home crowd at a neutral site
@@ -297,9 +337,10 @@ def game_reasons(game: dict, tiers: pl.DataFrame, names: dict[str, str] | None =
 
 
 def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
-                  key_players: list[dict]) -> dict:
+                  key_players: list[dict], defense_type: str | None = None) -> dict:
     """Plain-language team profile from oriented metric percentiles (100 = best),
-    neutral-situation pass-rate percentile (0-1) and key players with archetypes."""
+    neutral-situation pass-rate percentile (0-1), key players with archetypes and the
+    defense's archetype."""
     if pass_rate_pct is None:
         lean = "Balanced play-calling"
     elif pass_rate_pct >= 0.67:
@@ -308,19 +349,25 @@ def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
         lean = "Run-first offense"
     else:
         lean = "Balanced play-calling"
-    off = np.mean([pcts[m] for m in OFF_CORE if m in pcts]) if pcts else 50
-    dfn = np.mean([pcts[m] for m in DEF_CORE if m in pcts]) if pcts else 50
+    def unit(overall: str, core: list[str]) -> float:
+        if overall in pcts:
+            return float(pcts[overall])
+        vals = [pcts[m] for m in core if m in pcts]
+        return float(np.mean(vals)) if vals else 50.0
+
+    off, dfn = unit(OVERALL["off"], OFF_CORE), unit(OVERALL["def"], DEF_CORE)
     if off - dfn >= 15:
-        side = "carried by its offense"
+        side = "carried by its offense" if off >= 50 else "better on offense than defense"
     elif dfn - off >= 15:
-        side = "carried by its defense"
+        side = "carried by its defense" if dfn >= 50 else "better on defense than offense"
     elif min(off, dfn) >= 60:
         side = "strong on both sides of the ball"
     elif max(off, dfn) <= 40:
         side = "struggling on both sides of the ball"
     else:
         side = "even on both sides of the ball"
-    ranked = sorted(pcts.items(), key=lambda kv: -kv[1])
+    ranked = sorted(((m, p) for m, p in pcts.items() if m not in OVERALL.values()),
+                    key=lambda kv: -kv[1])
     strengths = [f"{FACTORS[m][0]} ({tier(p)})" for m, p in ranked[:2] if p >= 65]
     weak = [f"{FACTORS[m][0]} ({tier(p)})" for m, p in ranked[-1:] if p <= 35]
     players = []
@@ -330,5 +377,11 @@ def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
             players.append(pos + " " + ", ".join(
                 p["player_name"] + (f" ({p['archetype']})" if p.get("archetype") else "")
                 for p in ps))
+    def_best = sorted(((m, p) for m, p in pcts.items()
+                       if m.startswith("def_") and m != OVERALL["def"]), key=lambda kv: -kv[1])
+    defense = {"type": defense_type, "overall": tier(dfn),
+               "best_at": FACTORS[def_best[0][0]][0] if def_best else None,
+               "worst_at": FACTORS[def_best[-1][0]][0] if len(def_best) > 1 else None}
     return {"label": f"{lean}, {side}", "strengths": strengths, "weakness": weak,
-            "players": players, "offense_pct": float(off), "defense_pct": float(dfn)}
+            "players": players, "offense_pct": off, "defense_pct": dfn,
+            "offense_overall": tier(off), "defense": defense}
