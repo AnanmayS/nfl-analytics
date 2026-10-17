@@ -135,7 +135,7 @@ Blitz and box counts come from participation data through 2025 and FTN charting 
 - The **prior** is last season's team mean regressed 50% toward last season's league mean. It enters as 4 pseudo-games that decay like any other game, so week 1 is pure prior and the prior fades as games accrue.
 - A game's feature is the as-of state from the team's last game **strictly before** its kickoff date. Unplayed future games get the latest state.
 
-**Model inputs:** home-minus-away differences of the 12 core metrics, the 6 whole-defense stats and the starting-QB-out flag (from this week's injury report, below) (everything above except the stacked-box rate), rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
+**Model inputs:** home-minus-away differences of the 12 core metrics, the 6 whole-defense stats (everything above except the stacked-box rate), the starting-QB change and quality swing (below), rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
 
 The whole-defense stats were tested before being added: decided on 2018–21 and confirmed on 2022–26, with results stored in `game_defense_lift`. They leave the logistic model unchanged (log loss 0.6413 → 0.6413, CI ±0.004) and nudge XGBoost (0.6524 → 0.6492, Δ −0.003, CI −0.008 to +0.002). Since they cost nothing in accuracy, they're kept so the explanations can cite defense as a whole.
 
@@ -145,7 +145,17 @@ The whole-defense stats were tested before being added: decided on 2018–21 and
 - offensive starters missing, weighted by snap share;
 - defensive starters missing, weighted the same way.
 
-All three were tested walk-forward, decided on 2018–21 and confirmed on 2022–26. Only the **starting-QB flag** helped in both periods (log loss −0.0009 and −0.0017; the full set was *worse* on 2018–21), so it's the one in the model. In the final run it improves logistic log loss from 0.6413 to 0.6400 (Δ −0.0013, 95% CI −0.0033 to +0.0006; `game_injury_lift`). On the 163 games where a starting QB was listed out, log loss falls from 0.649 to 0.633; Vegas is at 0.591 on those games. The missing-starter counts and named absences are still shown on the dashboard.
+All three were tested walk-forward, decided on 2018–21 and confirmed on 2022–26. Only the **starting-QB flag** helped in both periods (log loss −0.0009 and −0.0017; the full set was *worse* on 2018–21), so it was added to the model, improving log loss from 0.6413 to 0.6400. It has since been replaced by the starting-QB features below, which subsume it. The missing-starter counts and named absences are still shown on the dashboard.
+
+**Who's starting at QB** (`src/features/quarterbacks.py`, `game_qb`). A review of 2025–26 misses found that most of the model's own errors were QB changes the injury report never shows:
+
+- players moved to injured reserve drop off the report (e.g. Joe Burrow in 2025 week 3);
+- benchings and rookies taking over (Quinn Ewers for Miami in 2025 week 16);
+- offseason moves, since week-1 form comes from last season's QB (Aaron Rodgers to Pittsburgh).
+
+Each game's **expected starter** is the schedule's listed starting QB (nflverse fills this for played games and usually a week or two ahead). Failing that, if the recent starter isn't active on that week's roster (injured reserve, etc.) or is listed Out or Doubtful, it's the next QB by recent snaps. Otherwise it's the recent starter. Each QB gets a **rating**: EPA per dropback from games before kickoff only, with earlier seasons weighted 0.6 per season back and 300 dropbacks of replacement-level play (−0.10) mixed in, so rookies and seldom-used backups rate near replacement. Features: `qb_change` (the expected starter isn't the recent one) and `qb_delta` (rating swing vs. the recent starter).
+
+Four variants were compared walk-forward against the injury-only QB flag. **qb_change + qb_delta** was best on 2018–21 (−0.0041) and on 2022–26 (−0.0049), and is now in the model. Over 2018–26, log loss improves from 0.6400 to 0.6355 (Δ −0.0045, 95% CI −0.0091 to −0.0001); this is the first addition that clears noise. Against a model with no QB information at all (`game_qb_lift`), logistic goes 0.6413 → 0.6354 (95% CI −0.0108 to −0.0007) and XGBoost 0.6492 → 0.6441 (−0.0089 to −0.0013). The pick rate is essentially unchanged: 63.4% → 63.1% over 2,298 games, and 60.9% → 61.7% for 2025–26. Of the 21 games in 2025–26 where the model was confidently wrong and Vegas was right, 8 involved a QB change; the new features get 4 of those 8 right. One caveat: for past games, the listed starter is whoever actually started, which was nearly always announced before kickoff; for upcoming games, it's nflverse's projection.
 
 **Models:** logistic regression (C = 0.1) and an XGBoost classifier for win probability; ridge and an XGBoost regressor for margin. Hyperparameters are fixed, not tuned on the test period.
 
@@ -157,13 +167,13 @@ All three were tested walk-forward, decided on 2018–21 and confirmed on 2022�
 
 | | Log loss | Brier | Accuracy | Margin MAE |
 |---|---|---|---|---|
-| Logistic | 0.640 | 0.225 | 63.4% | — |
-| XGBoost | 0.648 | 0.228 | 62.0% | — |
-| Ridge margin | — | — | 63.2% | 10.26 |
+| Logistic | 0.635 | 0.223 | 63.2% | — |
+| XGBoost | 0.644 | 0.226 | 63.0% | — |
+| Ridge margin | — | — | 63.5% | 10.24 |
 | **Closing spread** | **0.612** | **0.212** | **66.1%** | **9.85** |
 | De-vigged moneyline | 0.610 | 0.211 | 66.3% | — |
 
-The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.82 logistic, 0.72 XGBoost). The fitted Vegas coefficient of ~1.2 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
+The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.43 logistic, 0.54 XGBoost). The fitted Vegas coefficient of ~1.15 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
 
 ## Part 3 — Archetype mix → team efficiency
 
@@ -199,16 +209,16 @@ Paired bootstrap over games (95% CI):
 
 | Model | Base | + mix | Δ (95% CI) |
 |---|---|---|---|
-| Logistic, log loss | 0.640 | 0.656 | +0.016 (+0.006, +0.026), worse |
-| XGBoost, log loss | 0.648 | 0.645 | −0.003 (−0.009, +0.002), n.s. |
-| Ridge, margin MAE | 10.26 | 10.51 | +0.25 (+0.13, +0.37), worse |
-| XGBoost, margin MAE | 10.38 | 10.36 | −0.02 (−0.10, +0.05), n.s. |
+| Logistic, log loss | 0.635 | 0.652 | +0.017 (+0.006, +0.027), worse |
+| XGBoost, log loss | 0.644 | 0.642 | −0.002 (−0.007, +0.003), n.s. |
+| Ridge, margin MAE | 10.24 | 10.48 | +0.24 (+0.13, +0.36), worse |
+| XGBoost, margin MAE | 10.33 | 10.28 | −0.05 (−0.13, +0.03), n.s. |
 
-The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.30).
+The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.26).
 
 ## Leakage safeguards and tests
 
-`make test` runs 35 tests:
+`make test` runs 41 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -219,6 +229,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
   - the prior doesn't depend on the current season;
   - the exponential weights match a hand calculation.
 - **Injury availability** (`test_availability.py`): roles come only from earlier games, statuses map to sit chances, a long absence already reflected in recent snaps isn't counted again, and relocated team codes are normalized.
+- **Starting QB** (`test_quarterbacks.py`): ratings use only earlier games and decay old seasons; a new or unknown QB rates at replacement level; a listed starter wins; injured reserve or an Out listing falls back to the backup.
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
@@ -231,6 +242,7 @@ The walk-forward loop trains only on `game_date < week_start`. Archetype project
 - **Proxies.** Pressure is sack-or-hit; route participation is "on field for a dropback".
 - **Defensive scheme data.** Man/zone coverage exists only for 2018–25, so it's left out of the defense archetypes. Blitz and box counts switch sources in 2023 and 2026 (participation → FTN charting).
 - **Archetypes include efficiency** (by choice), which muddies "beyond talent" tests. The style-only toggle exists for a cleaner Part 3.
-- **Injury reports** use fixed sit chances (Out 1.0, Doubtful 0.9, Questionable 0.2) and can't see late scratches or players who aren't on the report. Reports pulled mid-week are incomplete, so refresh again after Friday's final report. The model uses only the starting-QB flag. "Starters missing" counts are shown on the dashboard but didn't improve predictions.
+- **Injury reports** use fixed sit chances (Out 1.0, Doubtful 0.9, Questionable 0.2) and can't see late scratches or players who aren't on the report. Reports pulled mid-week are incomplete, so refresh again after Friday's final report. The model uses only the QB features. "Starters missing" counts are shown on the dashboard but didn't improve predictions.
+- **QB ratings** are a single number (shrunken EPA per dropback). They don't capture scheme fit, the supporting cast, or how a backup has looked in practice. Games more than a week or two out have no listed starter yet and fall back to roster and injury status.
 - **The game model omits** weather and travel. Its week-1 rosters are last season's (no free agency or draft). Hyperparameters are untuned defaults.
 - **Vegas efficiency.** The closing line already prices everything here and more. Beating it would take information the market lacks, not a better summary of public play-by-play.
