@@ -11,7 +11,9 @@ make install      # uv sync
 make ingest       # nflreadpy -> data/raw/*.parquet -> data/nfl.duckdb (raw_* tables)
 make features     # feat_receiving / feat_rushing / feat_passing
 make archetypes   # archetype_<pos> tables + data/out/archetypes_<pos>.html reports
-make train        # team features, archetype mix (Part 3), walk-forward models
+make train        # team features, injury availability, archetype mix, walk-forward models
+make evaluate     # train + comparison models (refreshes the lift tables; ~3x slower)
+make refresh      # weekly update: latest results, injury reports and lines -> new picks
 make app          # Streamlit dashboard
 make test
 ```
@@ -33,11 +35,20 @@ Stack: `nflreadpy` for data, parquet cache, DuckDB for transforms, polars (no pa
 | `app/streamlit_app.py` | Dashboard |
 | `tests/` | Feature unit tests and leakage tests |
 
+## Keeping picks current
+
+nflverse updates play-by-play nightly and posts each week's official injury reports, so new information arrives all week. **`make refresh`** pulls all of it and re-runs everything; so does the dashboard's **Get latest data** button. Completed seasons stay cached, and only the current season is re-downloaded. It takes a couple of minutes. Run it:
+
+- after Monday night, for the latest results and form;
+- again on Friday or Saturday, when final injury reports (Out / Doubtful / Questionable) and fresh betting lines are posted.
+
+The sidebar shows when the data was last updated, which date results run through, and which week's injury reports are loaded.
+
 ## Dashboard
 
 `make app` opens a team-first dashboard. Pick a team in the sidebar; the choice is kept in the URL (`?team=KC`), so it can be bookmarked.
 
-- **My team.** A team-identity card, then a card for the next game: win chance, a plain outlook ("Favored", "Toss-up"), projected margin and the Vegas line. Below it, the rest of the schedule with win-chance bars, then how our picks did in each of that team's games this season and last (✅/❌ next to Vegas), and the team's key players with their player type.
+- **My team.** A team-identity card, then a card for the next game: win chance, a plain outlook ("Favored", "Toss-up"), projected margin, the Vegas line and both teams' injury reports. Below it, the rest of the schedule with win-chance bars, then how our picks did in each of that team's games this season and last (✅/❌ next to Vegas), and the team's key players with their player type.
 - **This week.** A card for every game in the selected week, with our pick, the Vegas favorite and, once played, the final score.
 - **Track record.** League-wide pick accuracy against Vegas for the last two seasons, and a "when we're confident, are we right?" chart comparing predicted with actual win rates.
 - **Player types.** Each archetype described in words, with recent examples. A player lookup shows percentile bars against others at the position; it starts on the selected team's top player.
@@ -115,9 +126,17 @@ Blitz and box counts come from participation data through 2025 and FTN charting 
 - The **prior** is last season's team mean regressed 50% toward last season's league mean. It enters as 4 pseudo-games that decay like any other game, so week 1 is pure prior and the prior fades as games accrue.
 - A game's feature is the as-of state from the team's last game **strictly before** its kickoff date. Unplayed future games get the latest state.
 
-**Model inputs:** home-minus-away differences of the 12 core metrics plus the 6 whole-defense stats (everything above except the stacked-box rate), rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
+**Model inputs:** home-minus-away differences of the 12 core metrics, the 6 whole-defense stats and the starting-QB-out flag (from this week's injury report, below) (everything above except the stacked-box rate), rest difference (clipped ±7), and neutral-site and division-game flags. Home field is the intercept.
 
 The whole-defense stats were tested before being added: decided on 2018–21 and confirmed on 2022–26, with results stored in `game_defense_lift`. They leave the logistic model unchanged (log loss 0.6413 → 0.6413, CI ±0.004) and nudge XGBoost (0.6524 → 0.6492, Δ −0.003, CI −0.008 to +0.002). Since they cost nothing in accuracy, they're kept so the explanations can cite defense as a whole.
+
+**This week's injury report** (`src/features/availability.py`, `game_availability`). For every scheduled game, including upcoming ones, each player's recent role is his average snap share over the team's last 3 games before kickoff. His injury-report status is turned into a chance he sits: Out 1.0, Doubtful 0.9, Questionable 0.2. A player who already missed those 3 games has no recent role, so a long absence that the team's form already reflects isn't counted twice. Three candidate features came out of this:
+
+- the starting QB being out;
+- offensive starters missing, weighted by snap share;
+- defensive starters missing, weighted the same way.
+
+All three were tested walk-forward, decided on 2018–21 and confirmed on 2022–26. Only the **starting-QB flag** helped in both periods (log loss −0.0009 and −0.0017; the full set was *worse* on 2018–21), so it's the one in the model. In the final run it improves logistic log loss from 0.6413 to 0.6400 (Δ −0.0013, 95% CI −0.0033 to +0.0006; `game_injury_lift`). On the 163 games where a starting QB was listed out, log loss falls from 0.649 to 0.633; Vegas is at 0.591 on those games. The missing-starter counts and named absences are still shown on the dashboard.
 
 **Models:** logistic regression (C = 0.1) and an XGBoost classifier for win probability; ridge and an XGBoost regressor for margin. Hyperparameters are fixed, not tuned on the test period.
 
@@ -129,13 +148,13 @@ The whole-defense stats were tested before being added: decided on 2018–21 and
 
 | | Log loss | Brier | Accuracy | Margin MAE |
 |---|---|---|---|---|
-| Logistic | 0.641 | 0.225 | 63.4% | — |
-| XGBoost | 0.649 | 0.229 | 62.2% | — |
-| Ridge margin | — | — | 63.4% | 10.27 |
+| Logistic | 0.640 | 0.225 | 63.4% | — |
+| XGBoost | 0.648 | 0.228 | 62.0% | — |
+| Ridge margin | — | — | 63.2% | 10.26 |
 | **Closing spread** | **0.612** | **0.212** | **66.1%** | **9.85** |
 | De-vigged moneyline | 0.610 | 0.211 | 66.3% | — |
 
-The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.83 logistic, 0.76 XGBoost). The fitted Vegas coefficient of ~1.2 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
+The models are well calibrated (see `game_calibration` or the dashboard) but trail the market in every season except 2018, when logistic edged it (0.613 vs 0.614). A likelihood-ratio test of `y ~ logit(p_vegas) + logit(p_model)` finds **no information beyond the closing spread** (p = 0.82 logistic, 0.72 XGBoost). The fitted Vegas coefficient of ~1.2 means the σ = 13.45 conversion is slightly *under*-confident for this era; a σ near 11 fits better.
 
 ## Part 3 — Archetype mix → team efficiency
 
@@ -171,16 +190,16 @@ Paired bootstrap over games (95% CI):
 
 | Model | Base | + mix | Δ (95% CI) |
 |---|---|---|---|
-| Logistic, log loss | 0.641 | 0.657 | +0.016 (+0.006, +0.026), worse |
-| XGBoost, log loss | 0.649 | 0.646 | −0.003 (−0.009, +0.002), n.s. |
-| Ridge, margin MAE | 10.27 | 10.53 | +0.25 (+0.13, +0.38), worse |
-| XGBoost, margin MAE | 10.38 | 10.35 | −0.03 (−0.12, +0.04), n.s. |
+| Logistic, log loss | 0.640 | 0.656 | +0.016 (+0.006, +0.026), worse |
+| XGBoost, log loss | 0.648 | 0.645 | −0.003 (−0.009, +0.002), n.s. |
+| Ridge, margin MAE | 10.26 | 10.51 | +0.25 (+0.13, +0.37), worse |
+| XGBoost, margin MAE | 10.38 | 10.36 | −0.02 (−0.10, +0.05), n.s. |
 
-The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.33).
+The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the best model still trails the base logistic and the market, and no variant adds information beyond the spread (p ≥ 0.30).
 
 ## Leakage safeguards and tests
 
-`make test` runs 18 tests:
+`make test` runs 35 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -190,6 +209,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
   - a same-day state is never used;
   - the prior doesn't depend on the current season;
   - the exponential weights match a hand calculation.
+- **Injury availability** (`test_availability.py`): roles come only from earlier games, statuses map to sit chances, a long absence already reflected in recent snaps isn't counted again, and relocated team codes are normalized.
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
@@ -202,5 +222,6 @@ The walk-forward loop trains only on `game_date < week_start`. Archetype project
 - **Proxies.** Pressure is sack-or-hit; route participation is "on field for a dropback".
 - **Defensive scheme data.** Man/zone coverage exists only for 2018–25, so it's left out of the defense archetypes. Blitz and box counts switch sources in 2023 and 2026 (participation → FTN charting).
 - **Archetypes include efficiency** (by choice), which muddies "beyond talent" tests. The style-only toggle exists for a cleaner Part 3.
-- **The game model omits** QB injuries and changes, weather and travel. Its week-1 rosters are last season's (no free agency or draft). Hyperparameters are untuned defaults.
+- **Injury reports** use fixed sit chances (Out 1.0, Doubtful 0.9, Questionable 0.2) and can't see late scratches or players who aren't on the report. Reports pulled mid-week are incomplete, so refresh again after Friday's final report. The model uses only the starting-QB flag. "Starters missing" counts are shown on the dashboard but didn't improve predictions.
+- **The game model omits** weather and travel. Its week-1 rosters are last season's (no free agency or draft). Hyperparameters are untuned defaults.
 - **Vegas efficiency.** The closing line already prices everything here and more. Beating it would take information the market lacks, not a better summary of public play-by-play.
