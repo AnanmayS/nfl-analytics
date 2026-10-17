@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,7 +33,7 @@ from src.analysis.fan_view import (  # noqa: E402
     vegas_favorite_text,
 )
 from src.archetypes.pipeline import SPECS  # noqa: E402
-from src.config import DB_PATH  # noqa: E402
+from src.config import DATA, DB_PATH, ROOT  # noqa: E402
 
 st.set_page_config(page_title="NFL Game Predictions", page_icon="🏈", layout="wide")
 PALETTE = px.colors.qualitative.Set2 + px.colors.qualitative.Dark2
@@ -55,13 +57,65 @@ st.markdown("""
 
 
 # ------------------------------------------------------------------ data
+REFRESH_PID, REFRESH_LOG = DATA / "refresh.pid", DATA / "refresh.log"
+
+
+def refresh_running() -> bool:
+    try:
+        pid = int(REFRESH_PID.read_text())
+    except (FileNotFoundError, ValueError):
+        return False
+    try:  # our own child: reap it when done, so a finished run isn't left as a zombie
+        if os.waitpid(pid, os.WNOHANG)[0] == 0:
+            return True
+    except ChildProcessError:  # started by an earlier app session: just check it's alive
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            pass
+    REFRESH_PID.unlink(missing_ok=True)
+    return False
+
+
+def start_refresh() -> None:
+    """Run the weekly refresh in the background (same as `make refresh`)."""
+    log = open(REFRESH_LOG, "w")  # noqa: SIM115 - handed to the child process
+    proc = subprocess.Popen([sys.executable, "-m", "src.cli", "refresh"], cwd=ROOT,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    REFRESH_PID.write_text(str(proc.pid))
+
+
+if refresh_running():
+    st.title("🏈 Getting the latest data…")
+    st.info("Pulling new game results, injury reports and betting lines, then re-running "
+            "every pick. This takes a couple of minutes; the dashboard comes back on its own "
+            "when it's done.")
+
+    @st.fragment(run_every="10s")
+    def _poll() -> None:  # re-checks every 10s; reloads the whole page once the run is done
+        if not refresh_running():
+            st.rerun(scope="app")
+        tail = REFRESH_LOG.read_text().splitlines()[-1:] if REFRESH_LOG.exists() else []
+        if tail:
+            st.caption(f"Latest step: {tail[0][:160]}")
+
+    _poll()
+    st.stop()
+
+
 @st.cache_data(show_spinner=False)
-def q(sql: str) -> pl.DataFrame:
+def _q(sql: str, version: float) -> pl.DataFrame:
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         return con.execute(sql).pl()
     finally:
         con.close()
+
+
+def q(sql: str) -> pl.DataFrame:
+    """Cached query; the cache resets whenever the database file changes."""
+    return _q(sql, DB_PATH.stat().st_mtime)
 
 
 if not DB_PATH.exists():
@@ -118,8 +172,30 @@ def opponent_label(is_home: bool, opp: str) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def tiers() -> pl.DataFrame:
+def _tiers(version: float) -> pl.DataFrame:
     return metric_tiers(preds.filter(pl.col("season").is_in(HISTORY)))
+
+
+def tiers() -> pl.DataFrame:
+    return _tiers(DB_PATH.stat().st_mtime)
+
+
+def injury_html(game: dict, first: str) -> str:
+    """Injury-report lines for both teams of a game_predictions row, `first` team on top."""
+    side = {game["home_team"]: "home", game["away_team"]: "away"}
+    rows = []
+    for t in sorted(side, key=lambda x: x != first):
+        sd = side[t]
+        if not game.get(f"{sd}_report_available"):
+            txt = "<span class='muted'>report not out yet</span>"
+        elif game.get(f"{sd}_key_absences"):
+            txt = game[f"{sd}_key_absences"]
+            if (game.get(f"{sd}_qb_out") or 0) >= 0.5:
+                txt = f"⚠️ {txt}"
+        else:
+            txt = "no key players listed out"
+        rows.append(f"{nick(t)}: {txt}")
+    return "<b>Injury report</b><br>" + "<br>".join(rows)
 
 
 def identity_for(team: str) -> dict:
@@ -188,8 +264,21 @@ with st.sidebar:
     page = st.radio("Go to", ["My team", "This week", "Track record", "Player types",
                               "Under the hood"], label_visibility="collapsed",
                     format_func=lambda x: "Player & defense types" if x == "Player types" else x)
-    st.caption("Every prediction comes from a model trained only on games played before "
-               f"that week. Results through {last_played:%b %-d, %Y}.")
+    info = q("SELECT * FROM refresh_info").row(0, named=True) if "refresh_info" in have else None
+    if info:
+        st.caption(f"Data updated {info['refreshed_at']:%a %b %-d, %-I:%M %p}. Results through "
+                   f"{info['results_through']:%b %-d}; injury reports through week "
+                   f"{info['injury_report_week']}.")
+    else:
+        st.caption(f"Results through {last_played:%b %-d, %Y}.")
+    if st.button("Get latest data", width="stretch",
+                 help="Pulls new results, injury reports and betting lines, then re-runs "
+                      "every pick (a couple of minutes). Best before games: injury reports are "
+                      "final two days before kickoff."):
+        start_refresh()
+        st.rerun()
+    st.caption("Every prediction comes from a model trained only on information available "
+               "before that game.")
 
 
 # ------------------------------------------------------------------ my team
@@ -231,6 +320,7 @@ def page_team(team: str) -> None:
             verdict = f"Projected to win by about {margin:.0f} points"
         else:
             verdict = f"Projected to lose by about {margin:.0f} points"
+        game_row = preds.filter(pl.col("game_id") == nxt["game_id"]).row(0, named=True)
         st.subheader("Next game")
         st.markdown(f"""
 <div class='card'>
@@ -245,8 +335,9 @@ def page_team(team: str) -> None:
   <div class='muted' style='margin-top:6px'>The {nick(opp)}: {identity_for(opp)['label']}</div>
   <div style='margin-top:6px'><b>Defenses</b><br>{nick(team)}: {defense_text(team, True)}<br>
      {nick(opp)}: {defense_text(opp, True)}</div>
+  <div style='margin-top:6px'>{injury_html(game_row, team)}</div>
   <hr style='margin:10px 0;opacity:.3'>
-  {reasons_html(preds.filter(pl.col('game_id') == nxt['game_id']).row(0, named=True))}
+  {reasons_html(game_row)}
 </div>""", unsafe_allow_html=True)
 
         if upcoming.height > 1:
@@ -355,6 +446,11 @@ def page_week() -> None:
         home, away, p = r["home_team"], r["away_team"], r["p_logit"]
         fav, fp = (home, p) if p >= 0.5 else (away, 1 - p)
         result = ""
+        out_qbs = [f"{nick(t)} QB {r[f'{sd}_starting_qb']}"
+                   for t, sd in ((away, "away"), (home, "home"))
+                   if (r.get(f"{sd}_qb_out") or 0) >= 0.5]
+        qb_flag = (f"<div style='margin-top:6px'>⚠️ Starting QB likely out: {', '.join(out_qbs)}"
+                   "</div>") if out_qbs else ""
         if r["result"] is not None:
             right = None if r["result"] == 0 else (p > 0.5) == (r["result"] > 0)
             tag = {True: "✅ our pick won", False: "❌ our pick lost", None: "tie"}[right]
@@ -370,14 +466,15 @@ def page_week() -> None:
   <div style='margin-top:6px'>Our pick: <b>{nick(fav)}</b> ({fp:.0%},
     {confidence_label(fp).lower()})<br>
     Vegas: {vegas_favorite_text(r['spread_line'], nick(home), nick(away))}</div>
-  {result}
+  {qb_flag}{result}
 </div>""", unsafe_allow_html=True)
         with cols[i % 2].expander("Why this pick?"):
             st.markdown(f"""
 <div class='muted'>{nick(away)}: {identity_for(away)['label']}<br>
 {nick(home)}: {identity_for(home)['label']}</div>
 <div style='margin-top:6px'><b>Defenses</b><br>{nick(away)}: {defense_text(away, True)}<br>
-{nick(home)}: {defense_text(home, True)}</div><div style='margin-top:8px'></div>
+{nick(home)}: {defense_text(home, True)}</div>
+<div style='margin-top:6px'>{injury_html(r, away)}</div><div style='margin-top:8px'></div>
 {reasons_html(r)}""", unsafe_allow_html=True)
 
 

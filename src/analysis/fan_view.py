@@ -333,7 +333,22 @@ def game_reasons(game: dict, tiers: pl.DataFrame, names: dict[str, str] | None =
         if more > less:
             out.append({"favors": fav, "push": abs(rest),
                         "text": f"{nm[fav]} are better rested ({more:.0f} days vs. {less:.0f})"})
+    qb = game.get("contrib_d_qb_out")
+    hq, aq = game.get("home_qb_out") or 0, game.get("away_qb_out") or 0
+    if qb and hq != aq:
+        hurt = home if hq > aq else away
+        fav = away if hurt == home else home
+        if (qb > 0) == (fav == home):  # the push really goes against the team missing its QB
+            name = game.get(f"{'home' if hurt == home else 'away'}_starting_qb") or "QB"
+            out.append({"favors": fav, "push": abs(qb), "text":
+                        f"{nm[hurt]}' starting QB {name} is listed "
+                        f"{status_from_chance(max(hq, aq))}"})
     return sorted(out, key=lambda r: -r["push"])
+
+
+def status_from_chance(p: float) -> str:
+    """Injury-report status from the sit chance used in the model."""
+    return "Out" if p >= 0.95 else ("Doubtful" if p >= 0.5 else "Questionable")
 
 
 def team_identity(pcts: dict[str, float], pass_rate_pct: float | None,
