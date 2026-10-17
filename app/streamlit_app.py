@@ -530,6 +530,56 @@ def page_track() -> None:
             "for comparison: since 2018 it trails Vegas by about a point, more in the last "
             "two seasons.")
 
+    if "early_week_eval" in have:
+        tuesday_section()
+
+
+def tuesday_section() -> None:
+    """Early-week picks scored against the opening line (the fair 'beat Vegas' test)."""
+    ev = q("SELECT * FROM early_week_eval")
+    get = {r["metric"]: r for r in ev.iter_rows(named=True)}
+    st.subheader("Tuesday picks vs. the opening line")
+    st.write("The line at kickoff already knows everything: injuries, starters, news. The "
+             "fair test is earlier in the week: our pick made with only what's known on the "
+             "Tuesday of game week, against the line Vegas opened with.")
+    n = get["Tuesday pick: picks right"]["games"]
+    c1, c2, c3 = st.columns(3)
+    stat(c1, "Our Tuesday pick won", f"{get['Tuesday pick: picks right']['value']:.1%}",
+         f"{n:,} games since 2018")
+    stat(c2, "Opening-line favorite won", f"{get['Opening line: picks right']['value']:.1%}",
+         "the line when betting opened")
+    stat(c3, "Closing-line favorite won", f"{get['Closing line: picks right']['value']:.1%}",
+         "the line at kickoff")
+    only_us = get["Games where only the Tuesday pick was right"]
+    only_open = get["Games where only the opening line was right"]
+    move = get["Line moved toward our Tuesday number (disagree by 3+ pts)"]
+    cover = get["Our side covered the opening spread (disagree by 3+ pts)"]
+    st.markdown(
+        f"- In the **{only_us['games']:.0f} games** where our Tuesday pick and the opening line "
+        f"picked different winners, we were right **{only_us['value']:.0f}** times and the "
+        f"opening line **{only_open['value']:.0f}** (very unlikely to be luck).\n"
+        f"- When our Tuesday numbers disagreed with the opening line by 3+ points, the line "
+        f"then **moved our way {move['value']:.0%}** of the time ({move['games']:.0f} games). "
+        f"Our model sees where the market is heading.\n"
+        f"- Against the opening point spread in those games our side won "
+        f"**{cover['value']:.1%}**, a bit above the 52.4% needed to break even at standard "
+        f"odds, but that's still within luck for {cover['games']:.0f} games, so it isn't "
+        f"proven.")
+    bys = q("SELECT * FROM early_week_by_season")
+    fig = go.Figure([
+        go.Bar(name="Our Tuesday pick", x=bys["season"], y=bys["tuesday_pick"],
+               marker_color="#3182bd"),
+        go.Bar(name="Opening-line favorite", x=bys["season"], y=bys["opening_line"],
+               marker_color="#bdbdbd"),
+    ])
+    fig.update_layout(barmode="group", yaxis_tickformat=".0%", yaxis_range=[0.5, 0.75],
+                      height=340, legend={"orientation": "h", "y": 1.15}, margin={"t": 30},
+                      yaxis_title="Picked the winner")
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Opening lines come from the Australia Sports Betting historical file "
+               "(aussportsbetting.com/data). Re-download it each week to add opening lines "
+               "for upcoming games. Its terms are personal use only.")
+
 
 # ------------------------------------------------------------------ player types
 def page_players() -> None:
