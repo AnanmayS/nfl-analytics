@@ -18,11 +18,14 @@ from src.analysis import archetype_mix, team_profile
 from src.config import OUT
 from src.db import connect
 from src.features.availability import build_availability
+from src.features.quarterbacks import build_qb_features
 from src.features.team import ALL_METRICS, build_game_features
 from src.models.game import (
     AVAILABILITY,
     MODELS,
+    QB_COLS,
     add_availability,
+    add_qb_features,
     base_features,
     calibration,
     defense_features,
@@ -35,9 +38,10 @@ log = logging.getLogger(__name__)
 START_SEASON = 2018  # 2016 is burn-in (no prior), 2017 gives the first training season
 PROBS = ["p_logit", "p_xgb"]
 MARGINS = ["margin_ridge", "margin_xgb_reg"]
-# Only the starting-QB flag made the cut: the broader "starters missing" counts hurt on the
-# 2018-21 selection period (see README), so they're shown on the dashboard but not modeled.
-INJURY_FEATURES = ["d_qb_out"]
+# Who's starting at QB vs. who drove recent form (schedule-listed starter, injured reserve,
+# injury report). It beat the injury-report-only QB flag on both the 2018-21 selection and
+# 2022-26 confirmation periods; "starters missing" counts hurt and are display-only.
+QB_FEATURES = ["d_qb_change", "d_qb_delta"]
 
 
 def add_mix_features(games: pl.DataFrame, mix: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
@@ -124,16 +128,19 @@ def run(evaluate: bool = False) -> pl.DataFrame:
     with connect() as con:
         build_game_features(con)
         build_availability(con)
+        build_qb_features(con)
         games = con.execute("SELECT * FROM game_features").pl()
+        qb = con.execute("SELECT * FROM game_qb").pl()
         mix = con.execute("SELECT * FROM pregame_archetype_mix").pl()
         avail = con.execute("SELECT * FROM game_availability").pl()
     games, core = base_features(games)
     games, def_feats = defense_features(games)
     games, _ = add_availability(games, avail)
+    games, _ = add_qb_features(games, qb)
     games, mix_feats = add_mix_features(games, mix)
     games = vegas_probs(games)
-    # Main model: team form incl. whole-defense measures, plus this week's QB availability.
-    feats = core + def_feats + INJURY_FEATURES
+    # Main model: team form incl. whole-defense measures, plus who's starting at QB.
+    feats = core + def_feats + QB_FEATURES
 
     log.info("walk-forward: main (%d features)", len(feats))
     main = walk_forward(games, feats, START_SEASON)
@@ -143,14 +150,15 @@ def run(evaluate: bool = False) -> pl.DataFrame:
         "p_vegas", "p_moneyline", "home_rest", "away_rest", "neutral",
         *[f"{side}_{m}" for side in ("home", "away") for m in ALL_METRICS],
         *[f"{side}_{c}" for side in ("home", "away")
-          for c in [*AVAILABILITY, "key_absences", "starting_qb", "report_available"]],
+          for c in [*AVAILABILITY, "key_absences", "starting_qb", "report_available",
+                    *QB_COLS, "expected_qb", "recent_qb", "source"]],
     ).join(main, on="game_id", how="inner")
 
     tables: list[tuple[str, pl.DataFrame]] = []
     if evaluate:
         probs_only = [m for m in MODELS if m.kind == "prob"]
-        for suffix, fs, models in [("_nodef", core + INJURY_FEATURES, probs_only),
-                                   ("_noinj", core + def_feats, probs_only),
+        for suffix, fs, models in [("_nodef", core + QB_FEATURES, probs_only),
+                                   ("_noqb", core + def_feats, probs_only),
                                    ("_mix", feats + mix_feats, MODELS)]:
             log.info("walk-forward comparison %s (%d features)", suffix, len(fs))
             alt = walk_forward(games, fs, START_SEASON, models, explain=None)
@@ -159,8 +167,8 @@ def run(evaluate: bool = False) -> pl.DataFrame:
         tables += [("game_model_lift", lift_table(out)),
                    ("game_defense_lift",
                     lift_table(out, base_suffix="_nodef", new_suffix="", cols=PROBS)),
-                   ("game_injury_lift",
-                    lift_table(out, base_suffix="_noinj", new_suffix="", cols=PROBS))]
+                   ("game_qb_lift",
+                    lift_table(out, base_suffix="_noqb", new_suffix="", cols=PROBS))]
 
     extra = [f"{c}_mix" for c in PROBS] if evaluate else []
     probs_all = [*PROBS, *extra, "p_vegas", "p_moneyline"]

@@ -74,6 +74,25 @@ def add_availability(games: pl.DataFrame, avail: pl.DataFrame) -> tuple[pl.DataF
     ), names
 
 
+QB_COLS = ["qb_change", "qb_delta"]
+
+
+def add_qb_features(games: pl.DataFrame, qb: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
+    """Join each side's expected-starter info (src.features.quarterbacks) and add
+    home-minus-away qb_change and qb_delta."""
+    keep = [*QB_COLS, "expected_qb", "recent_qb", "source"]
+    for side in ("home", "away"):
+        games = games.join(
+            qb.select("game_id", pl.col("team").alias(f"{side}_team"),
+                      *[pl.col(c).alias(f"{side}_{c}") for c in keep]),
+            on=["game_id", f"{side}_team"], how="left")
+    names = [f"d_{c}" for c in QB_COLS]
+    return games.with_columns(
+        (pl.col(f"home_{c}").fill_null(0.0) - pl.col(f"away_{c}").fill_null(0.0)).alias(f"d_{c}")
+        for c in QB_COLS
+    ), names
+
+
 @dataclass
 class ModelSpec:
     name: str
