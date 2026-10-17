@@ -98,6 +98,12 @@ starter AS (
            arg_max(player_name, off_share) AS qb_name, max(off_share) AS qb_share
     FROM roles WHERE position = 'QB' GROUP BY ALL
 ),
+backup AS (  -- next QB by recent snaps: the likely replacement if the starter can't go
+    SELECT r.game_id, r.team, arg_max(r.player_id, r.off_share) AS qb_id,
+           arg_max(r.player_name, r.off_share) AS qb_name
+    FROM roles r JOIN starter st ON st.game_id = r.game_id AND st.team = r.team
+    WHERE r.position = 'QB' AND r.player_id <> st.qb_id GROUP BY ALL
+),
 hit AS (  -- reported players with a recent role
     SELECT t.game_id, t.team, r.player_id, r.player_name, r.position, i.status,
            i.sit_chance, r.off_share, r.def_share,
@@ -111,7 +117,8 @@ SELECT t.game_id, t.team,
        (rp.team IS NOT NULL) AS report_available,
        coalesce(max(CASE WHEN h.player_id = st.qb_id AND st.qb_share >= {STARTER_SHARE}
                          THEN h.sit_chance END), 0) AS qb_out,
-       any_value(st.qb_name) AS starting_qb,
+       any_value(st.qb_name) AS starting_qb, any_value(st.qb_id) AS starting_qb_id,
+       any_value(bk.qb_id) AS backup_qb_id, any_value(bk.qb_name) AS backup_qb,
        coalesce(sum(CASE WHEN h.position <> 'QB' THEN h.sit_chance * h.off_share END), 0)
            AS off_missing,
        coalesce(sum(h.sit_chance * h.def_share), 0) AS def_missing,
@@ -121,6 +128,7 @@ SELECT t.game_id, t.team,
 FROM tg t
 LEFT JOIN reported rp ON rp.season = t.season AND rp.week = t.week AND rp.team = t.team
 LEFT JOIN starter st ON st.game_id = t.game_id AND st.team = t.team
+LEFT JOIN backup bk ON bk.game_id = t.game_id AND bk.team = t.team
 LEFT JOIN hit h ON h.game_id = t.game_id AND h.team = t.team
 GROUP BY t.game_id, t.team, rp.team
 """
