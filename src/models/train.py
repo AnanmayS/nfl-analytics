@@ -21,6 +21,8 @@ from src.features.availability import build_availability
 from src.features.quarterbacks import build_qb_features
 from src.features.ratings import RATING_COLS, add_rating_features, build_ratings
 from src.features.team import ALL_METRICS, build_game_features
+from src.ingest import odds
+from src.models import early
 from src.models.game import (
     AVAILABILITY,
     MODELS,
@@ -127,6 +129,7 @@ def run(evaluate: bool = False) -> pl.DataFrame:
     triples the runtime, so the weekly refresh skips it and keeps the last evaluation.
     """
     archetype_mix.build()
+    odds.run()  # opening lines, if data/external/nfl.xlsx is present
     with connect() as con:
         build_game_features(con)
         build_availability(con)
@@ -134,6 +137,11 @@ def run(evaluate: bool = False) -> pl.DataFrame:
         ratings = build_ratings(con)
         games = con.execute("SELECT * FROM game_features").pl()
         qb = con.execute("SELECT * FROM game_qb").pl()
+        qb_early = con.execute("SELECT * FROM game_qb_early").pl()
+        have_lines = bool(con.execute("SELECT count(*) FROM information_schema.tables "
+                                      "WHERE table_name = 'game_lines'").fetchone()[0])
+        lines = con.execute("SELECT game_id, open_spread FROM game_lines").pl() \
+            if have_lines else None
         mix = con.execute("SELECT * FROM pregame_archetype_mix").pl()
         avail = con.execute("SELECT * FROM game_availability").pl()
     games, core = base_features(games)
@@ -171,6 +179,23 @@ def run(evaluate: bool = False) -> pl.DataFrame:
     )
 
     tables: list[tuple[str, pl.DataFrame]] = []
+    if lines is not None:
+        # Tuesday view: same model, but QB info as known on Tuesday, blended with the
+        # opening line instead of the closing one.
+        log.info("walk-forward: Tuesday picks vs. opening line")
+        early_games, _ = add_qb_features(games.drop([c for c in games.columns if any(
+            c == f"{side}_{q}" for side in ("home", "away")
+            for q in [*QB_COLS, "expected_qb", "recent_qb", "source"])] + ["d_qb_change",
+                                                                         "d_qb_delta"]),
+            qb_early)
+        early_games = early_games.join(lines, on="game_id", how="left")
+        tue = early.tuesday_predictions(early_games, feats, [m for m in MODELS
+                                                             if m.name == "logit"],
+                                        START_SEASON)
+        out = out.join(tue, on="game_id", how="left").join(lines, on="game_id", how="left")
+        summary, by_season = early.evaluate(out)
+        tables += [("early_week_eval", summary), ("early_week_by_season", by_season)]
+        log.info("Tuesday picks vs. opening line:\n%s", summary)
     if evaluate:
         probs_only = [m for m in MODELS if m.kind == "prob"]
         for suffix, fs, models in [("_nodef", core + QB_FEATURES + rating_feats, probs_only),

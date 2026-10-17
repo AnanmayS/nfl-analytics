@@ -228,8 +228,8 @@ def _logit(p: pl.Expr) -> pl.Expr:
     return (p / (1 - p)).log()
 
 
-def market_blend(df: pl.DataFrame, start_season: int, stats_col: str = "p_logit"
-                 ) -> pl.DataFrame:
+def market_blend(df: pl.DataFrame, start_season: int, stats_col: str = "p_logit",
+                 line_col: str = "p_vegas") -> pl.DataFrame:
     """Combine the stats model with the betting line, walk-forward.
 
     df needs game_id, season, week, game_date, result, home_win, p_vegas and stats_col
@@ -239,7 +239,7 @@ def market_blend(df: pl.DataFrame, start_season: int, stats_col: str = "p_logit"
     p_blend and blend_contrib_* (log-odds pushes from each input and the intercept).
     """
     d = df.with_columns(stats_logit=_logit(pl.col(stats_col)),
-                        vegas_logit=_logit(pl.col("p_vegas")))
+                        vegas_logit=_logit(pl.col(line_col)))
     out = walk_forward(d, ["stats_logit", "vegas_logit"], start_season, [BLEND], explain="blend")
     return out.rename({c: f"blend_{c}" for c in out.columns if c.startswith("contrib_")})
 

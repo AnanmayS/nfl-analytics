@@ -83,8 +83,11 @@ def rating_asof(lookups: pl.DataFrame, states: pl.DataFrame, qb_col: str) -> pl.
 
 
 def expected_starters(games: pl.DataFrame, roster_status: pl.DataFrame,
-                      states: pl.DataFrame) -> pl.DataFrame:
+                      states: pl.DataFrame, early_week: bool = False) -> pl.DataFrame:
     """Pick each team-game's expected starting QB and compute qb_change / qb_delta.
+
+    early_week=True uses only what's known on the Tuesday of game week: no listed starter,
+    no injury report (it starts Wednesday), and roster status from earlier weeks only.
 
     games: game_id, team, season, week, game_date, listed_qb_id/name, recent_qb_id/name,
            backup_qb_id/name, recent_qb_sit (injury-report sit chance of the recent starter)
@@ -92,9 +95,14 @@ def expected_starters(games: pl.DataFrame, roster_status: pl.DataFrame,
     """
     # Latest roster status for the recent starter at or before this week (future weeks
     # use the newest roster available).
+    if early_week:
+        games = games.with_columns(listed_qb_id=pl.lit(None, pl.String),
+                                   listed_qb=pl.lit(None, pl.String),
+                                   recent_qb_sit=pl.lit(None, pl.Float64))
     rs = roster_status.sort("week")
-    st = games.select("game_id", "team", "season", "week", "recent_qb_id").sort("week").join_asof(
-        rs.rename({"player_id": "recent_qb_id", "week": "r_week"}), left_on="week",
+    st = games.select("game_id", "team", "season", "week", "recent_qb_id").with_columns(
+        lookup_week=pl.col("week") - (1 if early_week else 0)).sort("lookup_week").join_asof(
+        rs.rename({"player_id": "recent_qb_id", "week": "r_week"}), left_on="lookup_week",
         right_on="r_week", by=["season", "team", "recent_qb_id"], strategy="backward",
         check_sortedness=False,
     ).select("game_id", "team", "status")
@@ -126,7 +134,8 @@ def expected_starters(games: pl.DataFrame, roster_status: pl.DataFrame,
 
 
 def build_qb_features(con: duckdb.DuckDBPyConnection) -> None:
-    """Writes game_qb. Requires game_availability (src.features.availability)."""
+    """Writes game_qb (game-time view) and game_qb_early (Tuesday-of-game-week view).
+    Requires game_availability (src.features.availability)."""
     states = qb_states(con.execute(QB_GAMES_SQL.format(pbp="raw_pbp")).pl())
     fix = " ".join(f"WHEN '{k}' THEN '{v}'" for k, v in TEAM_FIX.items())
     games = con.execute(f"""
@@ -158,7 +167,8 @@ def build_qb_features(con: duckdb.DuckDBPyConnection) -> None:
         FROM raw_rosters_weekly WHERE position = 'QB' AND gsis_id IS NOT NULL
         GROUP BY ALL
     """).pl()
-    out = expected_starters(games, roster, states)
-    con.register("_qb", out.to_arrow())
-    con.execute("CREATE OR REPLACE TABLE game_qb AS SELECT * FROM _qb")
-    con.unregister("_qb")
+    for table, early in (("game_qb", False), ("game_qb_early", True)):
+        out = expected_starters(games, roster, states, early_week=early)
+        con.register("_qb", out.to_arrow())
+        con.execute(f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM _qb")
+        con.unregister("_qb")
