@@ -19,6 +19,7 @@ from src.config import OUT
 from src.db import connect
 from src.features.availability import build_availability
 from src.features.quarterbacks import build_qb_features
+from src.features.ratings import RATING_COLS, add_rating_features, build_ratings
 from src.features.team import ALL_METRICS, build_game_features
 from src.models.game import (
     AVAILABILITY,
@@ -29,6 +30,7 @@ from src.models.game import (
     base_features,
     calibration,
     defense_features,
+    market_blend,
     score,
     vegas_probs,
     walk_forward,
@@ -129,6 +131,7 @@ def run(evaluate: bool = False) -> pl.DataFrame:
         build_game_features(con)
         build_availability(con)
         build_qb_features(con)
+        ratings = build_ratings(con)
         games = con.execute("SELECT * FROM game_features").pl()
         qb = con.execute("SELECT * FROM game_qb").pl()
         mix = con.execute("SELECT * FROM pregame_archetype_mix").pl()
@@ -137,13 +140,19 @@ def run(evaluate: bool = False) -> pl.DataFrame:
     games, def_feats = defense_features(games)
     games, _ = add_availability(games, avail)
     games, _ = add_qb_features(games, qb)
+    games, rating_feats = add_rating_features(games, ratings)
     games, mix_feats = add_mix_features(games, mix)
     games = vegas_probs(games)
-    # Main model: team form incl. whole-defense measures, plus who's starting at QB.
-    feats = core + def_feats + QB_FEATURES
+    # Stats model: team form incl. whole-defense measures, who's starting at QB, and
+    # opponent-adjusted ratings.
+    feats = core + def_feats + QB_FEATURES + rating_feats
 
-    log.info("walk-forward: main (%d features)", len(feats))
-    main = walk_forward(games, feats, START_SEASON)
+    log.info("walk-forward: stats model (%d features)", len(feats))
+    # One extra season so the market blend has out-of-sample history to learn from.
+    main = walk_forward(games, feats, START_SEASON - 1)
+    log.info("walk-forward: stats + betting-line blend")
+    blend = market_blend(games.join(main.select("game_id", "p_logit"), on="game_id"),
+                         START_SEASON)
     out = games.select(
         "game_id", "season", "week", "game_type", "game_date", "gametime", "home_team",
         "away_team", "home_score", "away_score", "result", "home_win", "spread_line",
@@ -151,14 +160,22 @@ def run(evaluate: bool = False) -> pl.DataFrame:
         *[f"{side}_{m}" for side in ("home", "away") for m in ALL_METRICS],
         *[f"{side}_{c}" for side in ("home", "away")
           for c in [*AVAILABILITY, "key_absences", "starting_qb", "report_available",
-                    *QB_COLS, "expected_qb", "recent_qb", "source"]],
-    ).join(main, on="game_id", how="inner")
+                    *QB_COLS, "expected_qb", "recent_qb", "source", *RATING_COLS]],
+    ).join(main, on="game_id", how="inner").join(blend, on="game_id", how="left").filter(
+        pl.col("season") >= START_SEASON
+    ).with_columns(
+        # Final pick: stats + line when a line is posted, else the stats model alone.
+        p_final=pl.coalesce("p_blend", "p_logit"),
+        final_source=pl.when(pl.col("p_blend").is_not_null()).then(pl.lit("stats + line"))
+        .otherwise(pl.lit("stats only")),
+    )
 
     tables: list[tuple[str, pl.DataFrame]] = []
     if evaluate:
         probs_only = [m for m in MODELS if m.kind == "prob"]
-        for suffix, fs, models in [("_nodef", core + QB_FEATURES, probs_only),
-                                   ("_noqb", core + def_feats, probs_only),
+        for suffix, fs, models in [("_nodef", core + QB_FEATURES + rating_feats, probs_only),
+                                   ("_noqb", core + def_feats + rating_feats, probs_only),
+                                   ("_noratings", core + def_feats + QB_FEATURES, probs_only),
                                    ("_mix", feats + mix_feats, MODELS)]:
             log.info("walk-forward comparison %s (%d features)", suffix, len(fs))
             alt = walk_forward(games, fs, START_SEASON, models, explain=None)
@@ -168,22 +185,24 @@ def run(evaluate: bool = False) -> pl.DataFrame:
                    ("game_defense_lift",
                     lift_table(out, base_suffix="_nodef", new_suffix="", cols=PROBS)),
                    ("game_qb_lift",
-                    lift_table(out, base_suffix="_noqb", new_suffix="", cols=PROBS))]
+                    lift_table(out, base_suffix="_noqb", new_suffix="", cols=PROBS)),
+                   ("game_ratings_lift",
+                    lift_table(out, base_suffix="_noratings", new_suffix="", cols=PROBS))]
 
     extra = [f"{c}_mix" for c in PROBS] if evaluate else []
-    probs_all = [*PROBS, *extra, "p_vegas", "p_moneyline"]
+    probs_all = ["p_final", *PROBS, *extra, "p_vegas", "p_moneyline"]
     margins_all = [*MARGINS, *([f"{c}_mix" for c in MARGINS] if evaluate else []),
                    "spread_line"]
     metrics = score(out.filter(pl.col("p_moneyline").is_not_null()), probs_all, margins_all)
     seasons = sorted(out.filter(pl.col("home_win").is_not_null())["season"].unique())
     by_season = pl.concat([
-        score(out.filter(pl.col("season") == s), [*PROBS, "p_vegas"], [])
+        score(out.filter(pl.col("season") == s), ["p_final", *PROBS, "p_vegas"], [])
         .with_columns(season=pl.lit(s)) for s in seasons
     ])
     tables += [("game_predictions", out), ("game_metrics", metrics),
                ("game_metrics_by_season", by_season),
-               ("game_calibration", calibration(out, [*PROBS, "p_vegas"])),
-               ("game_vs_vegas", vs_vegas(out, PROBS + extra))]
+               ("game_calibration", calibration(out, ["p_final", *PROBS, "p_vegas"])),
+               ("game_vs_vegas", vs_vegas(out, ["p_final", *PROBS, *extra]))]
 
     with connect() as con:
         team_profile.build(con)

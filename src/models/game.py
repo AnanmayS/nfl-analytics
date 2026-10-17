@@ -101,8 +101,9 @@ class ModelSpec:
 
 
 MODELS = [
+    # C=0.01 (strong shrinkage) beat 0.03-1.0 on 2018-23; ~25 correlated inputs overfit
     ModelSpec("logit", "prob", lambda: make_pipeline(
-        StandardScaler(), LogisticRegression(C=0.1, max_iter=1000))),
+        StandardScaler(), LogisticRegression(C=0.01, max_iter=2000))),
     ModelSpec("xgb", "prob", lambda: XGBClassifier(
         n_estimators=300, max_depth=2, learning_rate=0.03, subsample=0.8,
         colsample_bytree=0.8, min_child_weight=10, reg_lambda=5.0, random_state=SEED,
@@ -216,3 +217,29 @@ def calibration(df: pl.DataFrame, prob_cols: list[str], bins: int = 10) -> pl.Da
                                         pl.len().alias("n"))
                    .with_columns(model=pl.lit(c)).sort("bin"))
     return pl.concat(out)
+
+
+BLEND = ModelSpec("blend", "prob", lambda: make_pipeline(
+    StandardScaler(), LogisticRegression(C=1e3, max_iter=1000)))
+
+
+def _logit(p: pl.Expr) -> pl.Expr:
+    p = p.clip(1e-4, 1 - 1e-4)
+    return (p / (1 - p)).log()
+
+
+def market_blend(df: pl.DataFrame, start_season: int, stats_col: str = "p_logit"
+                 ) -> pl.DataFrame:
+    """Combine the stats model with the betting line, walk-forward.
+
+    df needs game_id, season, week, game_date, result, home_win, p_vegas and stats_col
+    (the stats model's own walk-forward probability). Each week a 2-input logistic
+    regression on logit(stats) and logit(Vegas) is fit on earlier games only. Games with
+    no line yet get no blend (callers fall back to the stats model). Returns game_id,
+    p_blend and blend_contrib_* (log-odds pushes from each input and the intercept).
+    """
+    d = df.with_columns(stats_logit=_logit(pl.col(stats_col)),
+                        vegas_logit=_logit(pl.col("p_vegas")))
+    out = walk_forward(d, ["stats_logit", "vegas_logit"], start_season, [BLEND], explain="blend")
+    return out.rename({c: f"blend_{c}" for c in out.columns if c.startswith("contrib_")})
+
