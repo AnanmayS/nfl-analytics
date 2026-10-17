@@ -16,8 +16,16 @@ from sklearn.linear_model import LogisticRegression
 from src.analysis import archetype_mix, team_profile
 from src.config import OUT
 from src.db import connect
-from src.features.team import METRICS, build_game_features
-from src.models.game import base_features, calibration, score, vegas_probs, walk_forward
+from src.features.team import ALL_METRICS, build_game_features
+from src.models.game import (
+    MODELS,
+    base_features,
+    calibration,
+    defense_features,
+    score,
+    vegas_probs,
+    walk_forward,
+)
 
 log = logging.getLogger(__name__)
 START_SEASON = 2018  # 2016 is burn-in (no prior), 2017 gives the first training season
@@ -45,16 +53,18 @@ def log_loss_vec(p: np.ndarray, y: np.ndarray) -> np.ndarray:
     return -(y * np.log(p) + (1 - y) * np.log(1 - p))
 
 
-def lift_table(out: pl.DataFrame, n_boot: int = 2000) -> pl.DataFrame:
-    """Paired comparison of base vs +mix predictions with bootstrap 95% CIs."""
+def lift_table(out: pl.DataFrame, base_suffix: str = "", new_suffix: str = "_mix",
+               cols: list[str] = PROBS + MARGINS, n_boot: int = 2000) -> pl.DataFrame:
+    """Paired comparison of two prediction sets (columns c+base_suffix vs c+new_suffix)
+    with bootstrap 95% CIs over games. Negative delta = the new set is better."""
     s = out.filter(pl.col("home_win").is_not_null() & pl.col("p_vegas").is_not_null())
     y = s["home_win"].to_numpy().astype(float)
     r = s["result"].to_numpy().astype(float)
     rng = np.random.default_rng(42)
     idx = rng.integers(0, len(y), size=(n_boot, len(y)))
     rows = []
-    for c in PROBS + MARGINS:
-        a, b = s[c].to_numpy(), s[f"{c}_mix"].to_numpy()
+    for c in cols:
+        a, b = s[f"{c}{base_suffix}"].to_numpy(), s[f"{c}{new_suffix}"].to_numpy()
         if c in PROBS:
             metric = "log_loss"
             da, db = log_loss_vec(a, y), log_loss_vec(b, y)
@@ -63,7 +73,7 @@ def lift_table(out: pl.DataFrame, n_boot: int = 2000) -> pl.DataFrame:
             da, db = np.abs(a - r), np.abs(b - r)
         diff = db - da
         boots = diff[idx].mean(1)
-        rows.append(dict(model=c, metric=metric, base=da.mean(), with_mix=db.mean(),
+        rows.append(dict(model=c, metric=metric, base=da.mean(), new=db.mean(),
                          delta=diff.mean(), ci_low=np.quantile(boots, 0.025),
                          ci_high=np.quantile(boots, 0.975)))
     return pl.DataFrame(rows)
@@ -102,13 +112,19 @@ def run() -> pl.DataFrame:
         build_game_features(con)
         games = con.execute("SELECT * FROM game_features").pl()
         mix = con.execute("SELECT * FROM pregame_archetype_mix").pl()
-    games, feats = base_features(games)
+    games, core = base_features(games)
+    games, def_feats = defense_features(games)
     games, mix_feats = add_mix_features(games, mix)
     games = vegas_probs(games)
+    feats = core + def_feats  # main model: team form incl. whole-defense measures
 
-    log.info("walk-forward: base (%d features)", len(feats))
+    log.info("walk-forward: main (%d features)", len(feats))
     base = walk_forward(games, feats, START_SEASON)
-    log.info("walk-forward: base + archetype mix (%d features)", len(feats) + len(mix_feats))
+    log.info("walk-forward: without whole-defense extras (%d features)", len(core))
+    nodef = walk_forward(games, core, START_SEASON, [m for m in MODELS if m.kind == "prob"],
+                         explain=None)
+    nodef = nodef.rename({c: f"{c}_nodef" for c in nodef.columns if c != "game_id"})
+    log.info("walk-forward: + archetype mix (%d features)", len(feats) + len(mix_feats))
     withmix = walk_forward(games, feats + mix_feats, START_SEASON, explain=None)
     withmix = withmix.rename({c: f"{c}_mix" for c in withmix.columns if c != "game_id"})
 
@@ -116,8 +132,9 @@ def run() -> pl.DataFrame:
         "game_id", "season", "week", "game_type", "game_date", "gametime", "home_team",
         "away_team", "home_score", "away_score", "result", "home_win", "spread_line",
         "p_vegas", "p_moneyline", "home_rest", "away_rest", "neutral",
-        *[f"{side}_{m}" for side in ("home", "away") for m in METRICS],
-    ).join(base, on="game_id", how="inner").join(withmix, on="game_id", how="inner")
+        *[f"{side}_{m}" for side in ("home", "away") for m in ALL_METRICS],
+    ).join(base, on="game_id", how="inner").join(withmix, on="game_id", how="inner").join(
+        nodef, on="game_id", how="inner")
 
     probs_all = [*PROBS, *[f"{c}_mix" for c in PROBS], "p_vegas", "p_moneyline"]
     margins_all = [*MARGINS, *[f"{c}_mix" for c in MARGINS], "spread_line"]
@@ -129,16 +146,19 @@ def run() -> pl.DataFrame:
     ])
     cal = calibration(out, ["p_logit", "p_xgb", "p_logit_mix", "p_vegas"])
     lift = lift_table(out)
+    def_lift = lift_table(out, base_suffix="_nodef", new_suffix="", cols=PROBS)
     vegas = vs_vegas(out)
 
     with connect() as con:
         team_profile.build(con)
         for name, df in [("game_predictions", out), ("game_metrics", metrics),
                          ("game_metrics_by_season", by_season), ("game_calibration", cal),
-                         ("game_model_lift", lift), ("game_vs_vegas", vegas)]:
+                         ("game_model_lift", lift), ("game_defense_lift", def_lift),
+                         ("game_vs_vegas", vegas)]:
             _write(con, name, df)
     log.info("walk-forward metrics (%d-%d):\n%s", START_SEASON, out["season"].max(), metrics)
     log.info("archetype-mix lift:\n%s", lift)
+    log.info("whole-defense extras lift (main vs without):\n%s", def_lift)
     log.info("information beyond Vegas:\n%s", vegas)
     OUT.mkdir(parents=True, exist_ok=True)
     out.write_parquet(OUT / "game_predictions.parquet")

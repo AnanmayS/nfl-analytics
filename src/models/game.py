@@ -19,7 +19,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier, XGBRegressor
 
-from src.features.team import OFF_METRICS
+from src.features.team import DEFENSE_EXTRA, OFF_METRICS
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,15 @@ def base_features(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
     ]
     names += ["d_rest", "neutral", "div_game"]
     return df.with_columns(exprs), names
+
+
+def defense_features(df: pl.DataFrame) -> tuple[pl.DataFrame, list[str]]:
+    """Home-minus-away differences of the whole-defense extras (overall EPA allowed,
+    explosive plays, third downs, completion % over expected, throw depth, blitz rate)."""
+    names = [f"d_{m}" for m in DEFENSE_EXTRA]
+    return df.with_columns(
+        (pl.col(f"home_{m}") - pl.col(f"away_{m}")).alias(f"d_{m}") for m in DEFENSE_EXTRA
+    ), names
 
 
 @dataclass
