@@ -38,6 +38,7 @@ DATASETS: list[Dataset] = [
     Dataset("ngs_rushing", lambda s: nfl.load_nextgen_stats(s, "rushing")),
     Dataset("schedules", lambda s: nfl.load_schedules(s)),
     Dataset("ftn_charting", lambda s: nfl.load_ftn_charting(s), first_season=2022),
+    Dataset("injuries", lambda s: nfl.load_injuries(s)),  # weekly official injury reports
     Dataset("players", lambda _: nfl.load_players(), seasonal=False),  # id crosswalk
     Dataset("teams", lambda _: nfl.load_teams(), seasonal=False),  # names, colors, logos
 ]
