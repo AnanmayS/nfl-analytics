@@ -81,5 +81,13 @@ def refresh():
             pid_file.unlink()
 
 
+@app.command("export-app")
+def export_app():
+    """Write data/app.duckdb: just the dashboard's tables, for the hosted app."""
+    from src import export
+
+    export.run()
+
+
 if __name__ == "__main__":
     app()

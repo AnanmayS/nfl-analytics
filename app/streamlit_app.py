@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 import duckdb
@@ -34,6 +35,7 @@ from src.analysis.fan_view import (  # noqa: E402
 )
 from src.archetypes.pipeline import SPECS  # noqa: E402
 from src.config import DATA, DB_PATH, ROOT  # noqa: E402
+from src.export import APP_DB  # noqa: E402
 
 st.set_page_config(page_title="NFL Game Predictions", page_icon="🏈", layout="wide")
 PALETTE = px.colors.qualitative.Set2 + px.colors.qualitative.Dark2
@@ -57,6 +59,13 @@ st.markdown("""
 
 
 # ------------------------------------------------------------------ data
+# Without a local pipeline (e.g. on Streamlit Community Cloud) the app reads the slim database
+# that the scheduled GitHub Actions refresh publishes (.github/workflows/refresh.yml).
+HOSTED = not DB_PATH.exists()
+HOSTED_DB_URL = os.environ.get(
+    "NFL_APP_DB_URL",
+    "https://github.com/AnanmayS/nfl-analytics/releases/download/app-data/app.duckdb")
+DB = APP_DB if HOSTED else DB_PATH
 REFRESH_PID, REFRESH_LOG = DATA / "refresh.pid", DATA / "refresh.log"
 
 
@@ -104,9 +113,35 @@ if refresh_running():
     st.stop()
 
 
+@st.cache_resource(ttl="15m", show_spinner="Loading the latest picks…")
+def fetch_hosted_db() -> None:
+    """Download the published database; replace the local copy only when it changed, so the
+    query cache (keyed on the file's mtime) resets only on new data."""
+    APP_DB.parent.mkdir(parents=True, exist_ok=True)
+    tmp = APP_DB.with_suffix(".download")
+    try:
+        urllib.request.urlretrieve(HOSTED_DB_URL, tmp)
+    except OSError:
+        if not APP_DB.exists():
+            raise
+        return  # keep serving the copy we have
+    if APP_DB.exists() and tmp.read_bytes() == APP_DB.read_bytes():
+        tmp.unlink()
+    else:
+        tmp.replace(APP_DB)
+
+
+if HOSTED:
+    try:
+        fetch_hosted_db()
+    except OSError as e:
+        st.error(f"Couldn't download the latest data ({e}).")
+        st.stop()
+
+
 @st.cache_data(show_spinner=False)
 def _q(sql: str, version: float) -> pl.DataFrame:
-    con = duckdb.connect(str(DB_PATH), read_only=True)
+    con = duckdb.connect(str(DB), read_only=True)
     try:
         return con.execute(sql).pl()
     finally:
@@ -115,10 +150,10 @@ def _q(sql: str, version: float) -> pl.DataFrame:
 
 def q(sql: str) -> pl.DataFrame:
     """Cached query; the cache resets whenever the database file changes."""
-    return _q(sql, DB_PATH.stat().st_mtime)
+    return _q(sql, DB.stat().st_mtime)
 
 
-if not DB_PATH.exists():
+if not DB.exists():
     st.error("No data yet. Run `make all` first.")
     st.stop()
 have = set(q("SELECT table_name FROM information_schema.tables")["table_name"].to_list())
@@ -177,7 +212,7 @@ def _tiers(version: float) -> pl.DataFrame:
 
 
 def tiers() -> pl.DataFrame:
-    return _tiers(DB_PATH.stat().st_mtime)
+    return _tiers(DB.stat().st_mtime)
 
 
 def injury_html(game: dict, first: str) -> str:
@@ -281,7 +316,7 @@ with st.sidebar:
                    f"{info['injury_report_week']}.")
     else:
         st.caption(f"Results through {last_played:%b %-d, %Y}.")
-    if st.button("Get latest data", width="stretch",
+    if not HOSTED and st.button("Get latest data", width="stretch",
                  help="Pulls new results, injury reports and betting lines, then re-runs "
                       "every pick (a couple of minutes). Best before games: injury reports are "
                       "final two days before kickoff."):

@@ -1,6 +1,6 @@
 PY := uv run python -m src.cli
 
-.PHONY: install ingest features archetypes train evaluate refresh schedule unschedule app test lint all
+.PHONY: install ingest features archetypes train evaluate refresh export schedule unschedule app test lint all
 
 install:
 	uv sync
@@ -22,6 +22,9 @@ evaluate:  # train + comparison models (slower; refreshes the lift tables)
 
 refresh:  # weekly: latest stats, injury reports and lines, then new picks
 	$(PY) refresh
+
+export:  # data/app.duckdb: the dashboard's tables only, for the hosted app
+	$(PY) export-app
 
 schedule:  # run `refresh` automatically on Tuesdays and Saturdays at 8 AM (macOS launchd)
 	scripts/schedule_refresh.sh install

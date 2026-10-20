@@ -1,0 +1,79 @@
+# Weekly picks for the hosted dashboard: pull the latest nflverse data, re-run the pipeline,
+# and publish the slim dashboard database (src/export.py) as the `app-data` release asset.
+# The Streamlit Community Cloud app downloads that file; nothing is committed.
+name: Refresh picks
+
+on:
+  schedule:
+    - cron: "0 13 * * 2"  # Tuesday 13:00 UTC (8-9 AM Eastern): Monday night's results are in
+    - cron: "0 13 * * 6"  # Saturday: final injury reports and fresh lines
+  workflow_dispatch:
+
+permissions:
+  contents: write  # upload the release asset
+  actions: write   # keep the schedule enabled (below)
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      # Parquet cache + database from the previous run, so only the current season is
+      # re-downloaded. Cache keys are immutable, hence one key per run and a prefix restore.
+      - name: Restore data cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/raw
+            data/nfl.duckdb
+          key: nfl-data-${{ github.run_id }}
+          restore-keys: nfl-data-
+
+      # No cached database (first run, or the cache was evicted): build everything,
+      # including the comparison models behind the "Under the hood" lift tables.
+      - name: Refresh picks
+        run: |
+          if [ -f data/nfl.duckdb ]; then
+            uv run python -m src.cli refresh
+          else
+            make all
+          fi
+
+      - run: uv run python -m src.cli export-app
+
+      - name: Save data cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/raw
+            data/nfl.duckdb
+          key: nfl-data-${{ github.run_id }}
+
+      - name: Publish dashboard data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view app-data >/dev/null 2>&1 || gh release create app-data \
+            --title "Dashboard data" --prerelease \
+            --notes "Rebuilt by the Refresh picks workflow; read by the hosted dashboard."
+          gh release upload app-data data/app.duckdb --clobber
+
+      # GitHub disables schedules in public repos after 60 days without commits; re-enabling
+      # the workflow resets that clock, so the schedule survives a quiet season.
+      - name: Keep schedule enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/refresh.yml/enable"

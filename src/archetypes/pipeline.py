@@ -9,10 +9,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-import hdbscan
 import numpy as np
 import polars as pl
-import umap
 from sklearn.metrics import adjusted_rand_score, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
@@ -123,6 +121,8 @@ def select_model(Z: np.ndarray, E: np.ndarray, spec: PositionSpec):
     UMAP embedding keeps falling with k (UMAP manufactures local density), so GMM k is
     chosen by bootstrap stability among k >= min_k; BIC is reported for reference.
     """
+    import hdbscan  # imported here: slow to load, and the dashboard only needs SPECS
+
     rows, fitted = [], {}
     for k in spec.gmm_k:
         g = GaussianMixture(k, covariance_type="full", n_init=5, random_state=SEED).fit(E)
@@ -167,11 +167,15 @@ def predict(model, method: str, E: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if method == "gmm":
         p = model.predict_proba(E)
         return p.argmax(1), p.max(1)
+    import hdbscan
+
     lab, prob = hdbscan.approximate_predict(model, E)
     return lab, prob
 
 
 def run_position(con, spec: PositionSpec) -> pl.DataFrame:
+    import umap
+
     df, current = load_players(con, spec)
     fit_df = df.filter(pl.col("season") < current)
     proj_df = df.filter(pl.col("season") >= current)

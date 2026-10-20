@@ -16,6 +16,7 @@ make evaluate     # train + comparison models (refreshes the lift tables; ~3x sl
 make refresh      # weekly update: latest results, injury reports and lines -> new picks
 make schedule     # run refresh automatically Tue + Sat 8 AM (macOS launchd); make unschedule
 make app          # Streamlit dashboard
+make export       # data/app.duckdb: the dashboard's tables only, for the hosted app
 make test
 ```
 
@@ -52,6 +53,18 @@ The sidebar shows when the data was last updated, which date results run through
 - `make unschedule` removes the job.
 
 While any refresh is running, an open dashboard shows a "getting the latest data" screen and reloads by itself when the refresh is done.
+
+## Hosted dashboard
+
+The dashboard can run online so the picks are there every week without the Mac:
+
+- **GitHub Actions** (`.github/workflows/refresh.yml`) runs the refresh every Tuesday and Saturday at 13:00 UTC, the same days as the launchd job, and can be started by hand from the Actions tab. The parquet cache and database are kept in the Actions cache between runs, so a normal run only re-downloads the current season. If the cache is gone (first run, or evicted after 7 days unused), it runs `make all` instead, which takes longer.
+- Each run writes **`data/app.duckdb`** (`make export`, `src/export.py`). It holds only the ~26 tables the dashboard reads, about 10 MB instead of ~800 MB, and is uploaded to the `app-data` release.
+- **Streamlit Community Cloud** serves `app/streamlit_app.py`. With no local `data/nfl.duckdb`, the app downloads that release file, checks for a new one every 15 minutes, and hides the "Get latest data" button. `app/requirements.txt` lists the dashboard's own dependencies. It leaves out the clustering libraries and uses the CPU-only XGBoost build, so the app installs and starts quickly. Set `NFL_APP_DB_URL` to read the file from somewhere else.
+
+The runner doesn't have `data/external/nfl.xlsx`. The export also drops every opening-line column and the Tuesday-pick tables, so nothing from that personal-use file is published. The Tuesday section of Track record therefore shows only on the local dashboard.
+
+One-time setup: at [share.streamlit.io](https://share.streamlit.io), sign in with GitHub, choose **Create app**, pick this repo, branch `main` and file `app/streamlit_app.py`, and set Python 3.12 under Advanced settings. A Community Cloud app sleeps after several days without visitors and wakes in about 30 seconds when opened.
 
 ## Dashboard
 
