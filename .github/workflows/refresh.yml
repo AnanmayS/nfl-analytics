@@ -13,6 +13,9 @@ permissions:
   contents: write  # upload the release asset
   actions: write   # keep the schedule enabled (below)
 
+env:
+  TZ: America/New_York  # "Data updated" time on the dashboard is local, not UTC
+
 concurrency:
   group: refresh
   cancel-in-progress: false
