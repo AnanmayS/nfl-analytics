@@ -34,6 +34,7 @@ from src.analysis.fan_view import (  # noqa: E402
     vegas_favorite_text,
 )
 from src.archetypes.pipeline import SPECS  # noqa: E402
+from src.bets import LEAD, LEDGER, STAKE, STRATEGIES, STRATEGY_HELP  # noqa: E402
 from src.config import DATA, DB_PATH, ROOT  # noqa: E402
 from src.export import APP_DB  # noqa: E402
 
@@ -66,6 +67,8 @@ HOSTED_DB_URL = os.environ.get(
     "NFL_APP_DB_URL",
     "https://github.com/AnanmayS/nfl-analytics/releases/download/app-data/app.duckdb")
 DB = APP_DB if HOSTED else DB_PATH
+# Paper-bet ledger, kept by .github/workflows/bets.yml (or `make bets` locally)
+BETS_URL = os.environ.get("NFL_BETS_URL", HOSTED_DB_URL.rsplit("/", 1)[0] + "/bets.parquet")
 REFRESH_PID, REFRESH_LOG = DATA / "refresh.pid", DATA / "refresh.log"
 
 
@@ -306,7 +309,7 @@ with st.sidebar:
                         index=abbrs.index(default) if default in abbrs else 0)
     st.query_params["team"] = team
     st.image(logo(team), width=90)
-    page = st.radio("Go to", ["My team", "This week", "Track record", "Player types",
+    page = st.radio("Go to", ["My team", "This week", "Bets", "Track record", "Player types",
                               "Under the hood"], label_visibility="collapsed",
                     format_func=lambda x: "Player & defense types" if x == "Player types" else x)
     info = q("SELECT * FROM refresh_info").row(0, named=True) if "refresh_info" in have else None
@@ -526,6 +529,176 @@ def page_week() -> None:
 {reasons_html(r)}""", unsafe_allow_html=True)
 
 
+# ------------------------------------------------------------------ bets
+@st.cache_data(show_spinner=False)
+def _read_bets(version: float) -> pl.DataFrame:
+    return pl.read_parquet(LEDGER)
+
+
+@st.cache_data(ttl="15m", show_spinner=False)
+def _download_bets() -> pl.DataFrame | None:
+    tmp = DATA / "bets.download.parquet"
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(BETS_URL, tmp)
+        return pl.read_parquet(tmp)
+    except OSError:
+        return None
+
+
+def bets_ledger() -> pl.DataFrame | None:
+    """A local ledger (from `make bets`) if there is one, else the published one."""
+    if not HOSTED and LEDGER.exists():
+        return _read_bets(LEDGER.stat().st_mtime)
+    return _download_bets()
+
+
+def money(x: float) -> str:
+    return f"{'+' if x > 0 else '−' if x < 0 else ''}${abs(x):,.0f}"
+
+
+def matchup(r: dict) -> str:
+    """'Away at Home' for a bet row (team / opponent / is_home)."""
+    away, home = (r["opponent"], r["team"]) if r["is_home"] else (r["team"], r["opponent"])
+    return f"{nick(away)} at {nick(home)}"
+
+
+def clock(gametime: str | None) -> str:
+    """nflverse's 24-hour Eastern gametime as '1:00 PM'."""
+    if not gametime:
+        return ""
+    h, m = map(int, gametime.split(":"))
+    return f"{(h - 1) % 12 + 1}:{m:02d} {'PM' if h >= 12 else 'AM'}"
+
+
+def bet_label(r: dict) -> str:
+    line = "" if r["line"] is None else f" {r['line']:+g}"
+    return f"{nick(r['team'])}{line} ({r['odds']:+d})"
+
+
+def page_bets() -> None:
+    st.title("Paper bets")
+    st.write(f"About an hour before every kickoff we \"place\" a flat ${STAKE:.0f} bet on our "
+             "pick at the line posted at that moment, then settle it when the game ends. "
+             "No real money: this tracks what betting our picks would have won or lost.")
+    ledger = bets_ledger()
+    if ledger is None or ledger.height == 0:
+        st.info("No bets yet. They're placed by the *Place bets* GitHub Action every 15 "
+                "minutes (or `make bets` locally) once the picks have been refreshed.")
+        return
+    ledger = ledger.with_columns(
+        kickoff_et=pl.col("kickoff").dt.convert_time_zone("America/New_York"),
+        strategy_name=pl.col("strategy").replace_strict(STRATEGIES, default=pl.col("strategy")),
+    )
+    seasons = sorted(ledger["season"].unique().to_list(), reverse=True)
+    season = st.selectbox("Season", seasons) if len(seasons) > 1 else seasons[0]
+    bets = ledger.filter(pl.col("season") == season)
+    settled = bets.filter(pl.col("status") != "open")
+
+    cols = st.columns(len(STRATEGIES))
+    for c, (key, label) in zip(cols, STRATEGIES.items(), strict=True):
+        s = settled.filter(pl.col("strategy") == key)
+        n = {k: s.filter(pl.col("status") == k).height for k in ("won", "lost", "push")}
+        profit = float(s["profit"].sum()) if s.height else 0.0
+        staked = float(s["stake"].sum()) if s.height else 0.0
+        c.markdown(f"#### {label}")
+        c.caption(STRATEGY_HELP[key])
+        stat(c, "Profit", money(profit),
+             f"{n['won']}-{n['lost']}" + (f"-{n['push']}" if n["push"] else "")
+             + (f" · {profit / staked:+.1%} ROI" if staked else " · no bets yet"))
+
+    if settled.height:
+        st.subheader("Running total")
+        weekly = (settled.group_by("strategy", "week").agg(pl.col("profit").sum())
+                  .sort("week"))
+        fig = go.Figure()
+        for i, (key, label) in enumerate(STRATEGIES.items()):
+            w = weekly.filter(pl.col("strategy") == key)
+            if w.height:
+                fig.add_scatter(x=w["week"], y=w["profit"].cum_sum(), name=label,
+                                mode="lines+markers", line={"color": PALETTE[i], "width": 3})
+        fig.add_hline(y=0, line_color="rgba(128,128,128,.6)")
+        fig.update_layout(height=360, yaxis_tickprefix="$", xaxis_title="Week",
+                          xaxis_dtick=1, yaxis_title="Profit so far",
+                          legend={"orientation": "h", "y": 1.15}, margin={"t": 30})
+        st.plotly_chart(fig, width="stretch")
+
+    open_ = bets.filter(pl.col("status") == "open").sort("kickoff")
+    if open_.height:
+        st.subheader("Waiting on results")
+        st.dataframe(open_.select(
+            pl.col("kickoff_et").dt.strftime("%a %-I:%M %p").alias("Kickoff (ET)"),
+            pl.struct("team", "opponent", "is_home").map_elements(
+                matchup, return_dtype=pl.String).alias("Game"),
+            pl.col("strategy_name").alias("Strategy"),
+            pl.struct("team", "line", "odds").map_elements(bet_label, return_dtype=pl.String)
+            .alias("Bet"),
+            (pl.col("p_win") * 100).alias("Our chance"),
+            (pl.col("breakeven") * 100).alias("Needed to break even"),
+            pl.when(pl.col("odds") > 0).then(pl.col("stake") * pl.col("odds") / 100)
+            .otherwise(pl.col("stake") * 100 / -pl.col("odds")).alias("To win"),
+        ), hide_index=True, width="stretch", column_config={
+            "Our chance": st.column_config.NumberColumn(format="%.0f%%"),
+            "Needed to break even": st.column_config.NumberColumn(format="%.0f%%"),
+            "To win": st.column_config.NumberColumn(format="$%.2f"),
+        })
+
+    if season == CURRENT:
+        upcoming = preds.filter((pl.col("season") == CURRENT) & pl.col("result").is_null()
+                                & ~pl.col("game_id").is_in(bets["game_id"].implode()))
+        if upcoming.height:
+            wk = upcoming["week"].min()
+            nxt = upcoming.filter(pl.col("week") == wk).sort("game_date", "gametime")
+            st.subheader(f"Coming up: week {wk}")
+            st.caption(f"Bets go in {LEAD.seconds // 60} minutes before kickoff, at whatever "
+                       "the line is then; our current lean can still change with the line, "
+                       "injury news and Saturday's refresh.")
+            rows = []
+            for r in nxt.iter_rows(named=True):
+                home, away, p = r["home_team"], r["away_team"], r["p_final"]
+                fav, fp = (home, p) if p >= 0.5 else (away, 1 - p)
+                rows.append({"Kickoff (ET)": f"{fmt_date(r['game_date'])} {clock(r['gametime'])}",
+                             "Game": f"{nick(away)} at {nick(home)}",
+                             "Leaning": f"{nick(fav)} ({fp:.0%})",
+                             "Vegas": vegas_favorite_text(r["spread_line"], nick(home),
+                                                          nick(away))})
+            st.dataframe(pl.DataFrame(rows), hide_index=True, width="stretch")
+
+    if settled.height:
+        st.subheader("Every settled bet")
+        pick = st.multiselect("Strategies", list(STRATEGIES), default=list(STRATEGIES),
+                              format_func=STRATEGIES.get)
+        shown = settled.filter(pl.col("strategy").is_in(pick)).sort("kickoff", descending=True)
+        st.dataframe(shown.select(
+            pl.col("week").alias("Week"),
+            pl.col("kickoff_et").dt.strftime("%b %-d").alias("Date"),
+            pl.col("strategy_name").alias("Strategy"),
+            pl.struct("team", "line", "odds").map_elements(bet_label, return_dtype=pl.String)
+            .alias("Bet"),
+            pl.struct("team", "opponent", "team_score", "opp_score").map_elements(
+                lambda r: f"{nick(r['team'])} {r['team_score']}, {nick(r['opponent'])} "
+                          f"{r['opp_score']}", return_dtype=pl.String).alias("Final"),
+            pl.col("status").str.to_titlecase().alias("Result"),
+            pl.col("profit").alias("Profit"),
+            (pl.col("p_win") * 100).alias("Our chance"),
+            pl.col("placement").replace({"live": "1 hr before kickoff",
+                                         "backfill": "backfilled (closing line)"})
+            .alias("Placed"),
+        ), hide_index=True, width="stretch", column_config={
+            "Profit": st.column_config.NumberColumn(format="$%.2f"),
+            "Our chance": st.column_config.NumberColumn(format="%.0f%%"),
+        })
+        backfilled = bets.filter(pl.col("placement") == "backfill")
+        if backfilled.height:
+            st.caption(f"Bets on the {backfilled['game_id'].n_unique()} games played before "
+                       "betting started were backfilled: same pick, placed at the closing line, "
+                       "so the season total starts at week 1. Every later bet was placed live, "
+                       "an hour before kickoff.")
+    st.info("For context: at standard −110 odds a bettor needs to win 52.4% just to break "
+            "even. Our final pick leans heavily on the betting line itself (see Track record), "
+            "so expect results near break-even minus the bookmaker's cut, not a money machine.")
+
+
 # ------------------------------------------------------------------ track record
 def page_track() -> None:
     st.title("Track record")
@@ -729,7 +902,7 @@ def page_advanced() -> None:
                      width="stretch")
 
 
-PAGES = {"My team": lambda: page_team(team), "This week": page_week,
+PAGES = {"My team": lambda: page_team(team), "This week": page_week, "Bets": page_bets,
          "Track record": page_track, "Player types": page_players,
          "Under the hood": page_advanced}
 PAGES[page]()
