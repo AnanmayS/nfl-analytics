@@ -81,6 +81,18 @@ def refresh():
             pid_file.unlink()
 
 
+@app.command()
+def bets(
+    backfill: Annotated[bool | None, typer.Option(
+        help="Add closing-line bets for finished games that have none (default: only when "
+             "starting a new ledger).")] = None,
+):
+    """Paper bets: place bets on games kicking off within the hour and settle finished ones."""
+    from src import bets as b
+
+    b.run(backfill=backfill)
+
+
 @app.command("export-app")
 def export_app():
     """Write data/app.duckdb: just the dashboard's tables, for the hosted app."""
