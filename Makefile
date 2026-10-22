@@ -1,6 +1,6 @@
 PY := uv run python -m src.cli
 
-.PHONY: install ingest features archetypes train evaluate refresh export schedule unschedule app test lint all
+.PHONY: install ingest features archetypes train evaluate refresh bets export schedule unschedule app test lint all
 
 install:
 	uv sync
@@ -22,6 +22,9 @@ evaluate:  # train + comparison models (slower; refreshes the lift tables)
 
 refresh:  # weekly: latest stats, injury reports and lines, then new picks
 	$(PY) refresh
+
+bets:  # paper bets: place on games starting within the hour, settle finished ones
+	$(PY) bets
 
 export:  # data/app.duckdb: the dashboard's tables only, for the hosted app
 	$(PY) export-app
