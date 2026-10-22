@@ -1,0 +1,54 @@
+# Paper bets (src/bets.py): every 15 minutes, place flat bets on games kicking off within the
+# hour, using the line at that moment, and settle finished games. The ledger is the
+# `bets.parquet` asset on the `app-data` release, next to the dashboard database it reads
+# predictions from; the hosted dashboard downloads it too. Nothing is committed.
+name: Place bets
+
+on:
+  schedule:
+    # 12:00-05:59 UTC covers every kickoff window (9:30 AM ET London games through Monday
+    # night) plus settling the late games. GitHub may start scheduled runs a few minutes late;
+    # a game that has already kicked off is skipped, never bet late.
+    - cron: "*/15 0-5,12-23 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # upload the release asset
+
+concurrency:
+  group: bets
+  cancel-in-progress: false
+
+jobs:
+  bets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      - name: Download predictions and ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          gh release download app-data -p app.duckdb -D data
+          # No ledger yet on the first run: src/bets.py starts one (and backfills the season)
+          gh release download app-data -p bets.parquet -D data || true
+          sha256sum data/bets.parquet > data/bets.sha 2>/dev/null || true
+
+      - run: uv run python -m src.cli bets
+
+      - name: Publish ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f data/bets.parquet ] && ! sha256sum -c --status data/bets.sha 2>/dev/null; then
+            gh release upload app-data data/bets.parquet --clobber
+          fi
