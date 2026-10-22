@@ -75,8 +75,11 @@ jobs:
           gh release upload app-data data/app.duckdb --clobber
 
       # GitHub disables schedules in public repos after 60 days without commits; re-enabling
-      # the workflow resets that clock, so the schedule survives a quiet season.
-      - name: Keep schedule enabled
+      # the workflows resets that clock, so the schedules survive a quiet season.
+      - name: Keep schedules enabled
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/refresh.yml/enable"
+        run: |
+          for wf in refresh.yml bets.yml; do
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$wf/enable"
+          done
