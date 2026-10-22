@@ -137,15 +137,24 @@ def linear_contributions(model, X: np.ndarray) -> tuple[np.ndarray, float]:
     return scaler.transform(X) * lr.coef_[0], float(lr.intercept_[0])
 
 
+def raw_coefficients(model) -> tuple[np.ndarray, float]:
+    """The same pipeline as log-odds = intercept + coef @ x on unscaled inputs, so a
+    prediction can be recomputed later from new inputs (e.g. a line that has since moved)."""
+    scaler, lr = model[0], model[-1]
+    coef = lr.coef_[0] / scaler.scale_
+    return coef, float(lr.intercept_[0] - coef @ scaler.mean_)
+
+
 def walk_forward(
     df: pl.DataFrame, features: list[str], start_season: int, models: list[ModelSpec] = MODELS,
-    explain: str | None = "logit",
+    explain: str | None = "logit", coefs: bool = False,
 ) -> pl.DataFrame:
     """Predictions for every game from start_season on, each from a model fit only on
     games that kicked off before that game's week began.
 
     For the model named `explain`, also returns contrib_<feature> and contrib_intercept
-    columns (log-odds pushes toward the home team) from that same week's fit."""
+    columns (log-odds pushes toward the home team) from that same week's fit, and with
+    coefs=True its unscaled coef_<feature> and coef_intercept."""
     df = df.sort("game_date")
     weeks = (
         df.filter(pl.col("season") >= start_season)
@@ -172,6 +181,11 @@ def walk_forward(
                     for j, f in enumerate(features):
                         preds[f"contrib_{f}"] = contrib[:, j]
                     preds["contrib_intercept"] = np.full(len(Xte), intercept)
+                    if coefs:
+                        coef, intercept = raw_coefficients(model)
+                        for j, f in enumerate(features):
+                            preds[f"coef_{f}"] = np.full(len(Xte), coef[j])
+                        preds["coef_intercept"] = np.full(len(Xte), intercept)
             else:
                 model = m.factory().fit(Xtr, train["result"].to_numpy())
                 preds[f"margin_{m.name}"] = model.predict(Xte)
@@ -236,10 +250,13 @@ def market_blend(df: pl.DataFrame, start_season: int, stats_col: str = "p_logit"
     (the stats model's own walk-forward probability). Each week a 2-input logistic
     regression on logit(stats) and logit(Vegas) is fit on earlier games only. Games with
     no line yet get no blend (callers fall back to the stats model). Returns game_id,
-    p_blend and blend_contrib_* (log-odds pushes from each input and the intercept).
+    p_blend, blend_contrib_* (log-odds pushes from each input and the intercept) and
+    blend_coef_* (that week's fit, so src/bets.py can re-blend with the line at bet time).
     """
     d = df.with_columns(stats_logit=_logit(pl.col(stats_col)),
                         vegas_logit=_logit(pl.col(line_col)))
-    out = walk_forward(d, ["stats_logit", "vegas_logit"], start_season, [BLEND], explain="blend")
-    return out.rename({c: f"blend_{c}" for c in out.columns if c.startswith("contrib_")})
+    out = walk_forward(d, ["stats_logit", "vegas_logit"], start_season, [BLEND],
+                       explain="blend", coefs=True)
+    return out.rename({c: f"blend_{c}" for c in out.columns
+                       if c.startswith(("contrib_", "coef_"))})
 

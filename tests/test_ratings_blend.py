@@ -74,3 +74,13 @@ def test_market_blend_skips_games_without_a_line():
     with_line = out.filter(pl.col("p_vegas").is_not_null())
     assert with_line["p_blend"].null_count() == 0
     assert {"blend_contrib_vegas_logit", "blend_contrib_stats_logit"} <= set(out.columns)
+    # The stored unscaled coefficients reproduce the blend, so it can be redone with a new line
+    lo = with_line.with_columns(
+        sl=(pl.col("p_logit").clip(1e-4, 1 - 1e-4) / (1 - pl.col("p_logit").clip(1e-4, 1 - 1e-4)))
+        .log(),
+        vl=(pl.col("p_vegas").clip(1e-4, 1 - 1e-4) / (1 - pl.col("p_vegas").clip(1e-4, 1 - 1e-4)))
+        .log(),
+    ).select(pl.col("blend_coef_intercept") + pl.col("blend_coef_stats_logit") * pl.col("sl")
+             + pl.col("blend_coef_vegas_logit") * pl.col("vl"), "p_blend")
+    np.testing.assert_allclose(1 / (1 + np.exp(-lo.to_series(0).to_numpy())),
+                               lo["p_blend"].to_numpy(), atol=1e-9)
