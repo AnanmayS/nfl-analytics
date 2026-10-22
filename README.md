@@ -14,6 +14,7 @@ make archetypes   # archetype_<pos> tables + data/out/archetypes_<pos>.html repo
 make train        # team features, injury availability, archetype mix, walk-forward models
 make evaluate     # train + comparison models (refreshes the lift tables; ~3x slower)
 make refresh      # weekly update: latest results, injury reports and lines -> new picks
+make bets         # paper bets: place on games starting within the hour, settle finished ones
 make schedule     # run refresh automatically Tue + Sat 8 AM (macOS launchd); make unschedule
 make app          # Streamlit dashboard
 make export       # data/app.duckdb: the dashboard's tables only, for the hosted app
@@ -34,6 +35,7 @@ Stack: `nflreadpy` for data, parquet cache, DuckDB for transforms, polars (no pa
 | `src/analysis/archetype_mix.py` | Part 3: snap-weighted mix, nested tests, pre-kickoff mix features |
 | `src/analysis/archetype_report.py` | Standalone HTML archetype reports |
 | `src/analysis/fan_view.py` | Plain-language views for the dashboard (team-perspective predictions, pick records, trait descriptions) |
+| `src/bets.py` | Paper bets: placed an hour before kickoff, settled from final scores |
 | `app/streamlit_app.py` | Dashboard |
 | `tests/` | Feature unit tests and leakage tests |
 
@@ -64,6 +66,8 @@ The dashboard can run online so the picks are there every week without the Mac:
 
 The runner doesn't have `data/external/nfl.xlsx`. The export also drops every opening-line column and the Tuesday-pick tables, so nothing from that personal-use file is published. The Tuesday section of Track record therefore shows only on the local dashboard.
 
+A second workflow, **Place bets** (`.github/workflows/bets.yml`), runs every 15 minutes and keeps the paper-bet ledger (below) as `bets.parquet` on the same release.
+
 One-time setup: at [share.streamlit.io](https://share.streamlit.io), sign in with GitHub, choose **Create app**, pick this repo, branch `main` and file `app/streamlit_app.py`, and set Python 3.12 under Advanced settings. A Community Cloud app sleeps after several days without visitors and wakes in about 30 seconds when opened.
 
 ## Dashboard
@@ -72,6 +76,7 @@ One-time setup: at [share.streamlit.io](https://share.streamlit.io), sign in wit
 
 - **My team.** A team-identity card, then a card for the next game: win chance, a plain outlook ("Favored", "Toss-up"), projected margin, the Vegas line and both teams' injury reports. Below it, the rest of the schedule with win-chance bars, then how our picks did in each of that team's games this season and last (✅/❌ next to Vegas), and the team's key players with their player type.
 - **This week.** A card for every game in the selected week, with our pick, the Vegas favorite and, once played, the final score.
+- **Bets.** Season profit for each paper-betting strategy, a running total by week, bets waiting on results, the coming week's games, and every settled bet (see "Paper bets").
 - **Track record.** League-wide pick accuracy against Vegas for the last two seasons, and a "when we're confident, are we right?" chart comparing predicted with actual win rates.
 - **Player types.** Each archetype described in words, with recent examples. A player lookup shows percentile bars against others at the position; it starts on the selected team's top player.
 - **Under the hood.** The technical views: UMAP map, centroid heatmap, model metrics, calibration and the Part 3 tests.
@@ -87,6 +92,30 @@ Fans see the **final pick**: the stats model blended with the betting line when 
 **Why we lean a team.** The logistic model is a weighted sum, so each prediction splits exactly into per-factor pushes (`contrib_*` columns in `game_predictions`, taken from that week's walk-forward fit). The biggest pushes are shown as sentences that compare the two teams' league standing on that factor, e.g. "Patriots' passing offense (one of the league's best) vs. Jets' (below average)". A factor is shown only when the favored team really is better on it, and home field is left out for neutral-site games. All of a unit's factors are summed into one line, e.g. "Jets' defense as a whole (one of the league's best) vs. Patriots' (below average); biggest gap: run defense". This uses EPA per play allowed on every snap as the whole-unit rating, and the line appears only when that rating agrees with the direction of the push. Otherwise the individual factors are listed. These reasons describe the model's math; player archetypes appear in the identity card but don't drive this model.
 
 **Defense in the identity card** shows the defense's archetype, built from this season's stats so far, separately from its recent-form rating (rolling, blended with last season). It also names its best and weakest areas. Every game card compares the two defenses.
+
+## Paper bets
+
+To see what betting our picks would actually win or lose, `src/bets.py` "places" a flat $100 bet on every game about an hour before kickoff and settles it from the final score. No money is involved.
+
+**When.** The *Place bets* workflow runs every 15 minutes from 12:00 to 05:59 UTC. That covers every kickoff from 9:30 AM ET London games through Monday night, plus settling the late games. Each run pulls the current season's schedule from nflverse for the latest lines and scores, then bets every game that kicks off within the next 60 minutes (65 to allow for a late run) and doesn't have a bet yet. GitHub sometimes starts scheduled runs late. If a game has already kicked off it is skipped, never bet late.
+
+**The pick.** The stats model comes from the last refresh (Tuesday or Saturday). It's blended with the line **as it stands at bet time**, using that week's fitted blend coefficients (`blend_coef_*` in `game_predictions`), so a line that moved since Saturday still counts. Games with no line get no bet.
+
+**Three strategies**, each $100 a bet:
+
+| Strategy | Bet |
+|---|---|
+| Moneyline on our pick | Every game: our pick to win, at its moneyline |
+| Spread on our side | Every game: whichever side our projected margin (σ = 13.45, as on the dashboard) says beats the spread, at its spread odds (−110 if none is posted) |
+| Moneyline value bets | Only when our win chance beats the moneyline's break-even (vig included) by 3+ points, on either side |
+
+**Settling.** A moneyline bet wins if the team wins, and a tie is a push. A spread bet wins if the team's margin plus its line is positive, and exactly zero is a push. A win pays at the American odds taken, so $100 at −150 wins $66.67 and at +150 wins $150.
+
+**The ledger** (`data/bets.parquet`, one row per bet) only grows. Odds, line, our win chance and the break-even are fixed when a bet is placed. Each row also stores its status, scores and profit. When a new ledger is started, this season's finished games are **backfilled** from the closing line and marked `backfill`, so the season total starts at week 1; every later bet is `live`. `python -m src.cli bets --backfill` fills games a live run missed the same way.
+
+On GitHub the ledger lives on the `app-data` release and is uploaded only when it changes. The hosted dashboard downloads it every 15 minutes. Locally, `make bets` does one run against `data/bets.parquet`, and the local dashboard reads that file if it exists, otherwise the published ledger. Bets need predictions built with the blend coefficients, so after upgrading, run `make refresh` (or the Refresh picks workflow) once. Until then the bet step logs a warning and places nothing.
+
+**What to expect.** The final pick leans almost entirely on the betting line (see "Closing the gap to Vegas"). Betting it every game should come out near break-even minus the bookmaker's cut. Backfilling 2026 weeks 1–6 gave −5.8% on moneylines (58-34-1) and −13.9% on spreads (39-48-6). The value strategy bets rarely and is too small a sample to judge.
 
 ## Data
 
@@ -296,7 +325,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 
 ## Leakage safeguards and tests
 
-`make test` runs 46 tests:
+`make test` runs 53 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -310,6 +339,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 - **Starting QB** (`test_quarterbacks.py`): ratings use only earlier games and decay old seasons; a new or unknown QB rates at replacement level; a listed starter wins; injured reserve or an Out listing falls back to the backup.
 - **Ratings and blend** (`test_ratings_blend.py`): ratings recover the true team order, don't move when games on or after the week start are changed, and the blend produces nothing for games without a line.
 - **Opening lines and Tuesday picks** (`test_odds_early.py`): old team names, ±1-day dates, duplicate team codes and swapped neutral-site listings match the right game; the evaluation counts disagreements and line moves correctly.
+- **Paper bets** (`test_bets.py`): bets go in only in the hour before kickoff, never after it and never twice; backfill uses only finished games; Eastern kickoff times convert across daylight saving; moneyline, spread and push settlement and payouts match hand calculations; value bets can take the underdog. The stored blend coefficients reproduce the blend exactly (`test_ratings_blend.py`).
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
