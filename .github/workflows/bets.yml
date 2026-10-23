@@ -39,9 +39,17 @@ jobs:
         run: |
           mkdir -p data
           gh release download app-data -p app.duckdb -D data
-          # No ledger yet on the first run: src/bets.py starts one (and backfills the season)
-          gh release download app-data -p bets.parquet -D data || true
-          sha256sum data/bets.parquet > data/bets.sha 2>/dev/null || true
+          # Start a new ledger (src/bets.py backfills the season) only when none was ever
+          # published. If one exists, a failed download fails the run instead of replacing
+          # the ledger. The backup covers an upload that failed partway through --clobber.
+          assets=$(gh release view app-data --json assets -q '.assets[].name')
+          if grep -qx bets.parquet <<< "$assets"; then
+            gh release download app-data -p bets.parquet -D data
+            sha256sum data/bets.parquet > data/bets.sha  # publish only if this run changes it
+          elif grep -qx bets-backup.parquet <<< "$assets"; then
+            gh release download app-data -p bets-backup.parquet -D data
+            mv data/bets-backup.parquet data/bets.parquet  # no checksum: republish it
+          fi
 
       - run: uv run python -m src.cli bets
 
@@ -50,5 +58,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f data/bets.parquet ] && ! sha256sum -c --status data/bets.sha 2>/dev/null; then
+            cp data/bets.parquet data/bets-backup.parquet
+            gh release upload app-data data/bets-backup.parquet --clobber
             gh release upload app-data data/bets.parquet --clobber
           fi

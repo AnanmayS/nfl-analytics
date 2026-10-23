@@ -537,13 +537,19 @@ def _read_bets(version: float) -> pl.DataFrame:
 
 @st.cache_data(ttl="15m", show_spinner=False)
 def _download_bets() -> pl.DataFrame | None:
-    tmp = DATA / "bets.download.parquet"
-    try:
-        DATA.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(BETS_URL, tmp)
-        return pl.read_parquet(tmp)
-    except OSError:
-        return None
+    """The published ledger, or its backup while the bet job is replacing it; failing both,
+    the last copy downloaded."""
+    dest = DATA / "bets.download.parquet"
+    part = dest.with_suffix(".part")
+    DATA.mkdir(parents=True, exist_ok=True)
+    for url in (BETS_URL, BETS_URL.replace("bets.parquet", "bets-backup.parquet")):
+        try:
+            urllib.request.urlretrieve(url, part)
+            part.replace(dest)
+            break
+        except OSError:
+            continue
+    return pl.read_parquet(dest) if dest.exists() else None
 
 
 def bets_ledger() -> pl.DataFrame | None:
