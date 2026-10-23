@@ -19,7 +19,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import nflreadpy as nfl
 import numpy as np
 import polars as pl
 from scipy.stats import norm
@@ -198,7 +197,12 @@ def blend_coefs(preds: pl.DataFrame) -> pl.DataFrame:
         pl.col(c).fill_null(latest.get(c)) for c in cols])
 
 
-def _schedule(season: int) -> pl.DataFrame:
+def _schedule() -> pl.DataFrame:
+    """This season's schedule with the latest lines and scores. nflreadpy is imported here,
+    not at the top, because the hosted dashboard imports this module without it."""
+    import nflreadpy as nfl
+
+    season = nfl.get_current_season()
     return nfl.load_schedules([season]).filter(pl.col("game_type").is_not_null())
 
 
@@ -249,7 +253,7 @@ def run(now: datetime | None = None, backfill: bool | None = None) -> bool:
         # Built before the blend coefficients were stored: bets would ignore the line
         log.warning("game_predictions has no blend coefficients; run `make refresh` first")
         return False
-    schedule = _schedule(nfl.get_current_season())
+    schedule = _schedule()
     before = ledger.height, ledger.filter(pl.col("status") == "open").height
     ledger = place(schedule, preds, ledger, now, backfill=backfill)
     ledger = settle(ledger, schedule, now)
