@@ -2,6 +2,7 @@
 
 import logging
 import os
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -86,11 +87,14 @@ def bets(
     backfill: Annotated[bool | None, typer.Option(
         help="Add closing-line bets for finished games that have none (default: only when "
              "starting a new ledger).")] = None,
+    next_run: Annotated[Path | None, typer.Option(
+        help="Write the Unix time of the next useful run to this file (empty when the "
+             "season is over); used by scripts/bets_watch.sh.")] = None,
 ):
     """Paper bets: place bets on games kicking off within the hour and settle finished ones."""
     from src import bets as b
 
-    b.run(backfill=backfill)
+    b.run(backfill=backfill, next_run=next_run)
 
 
 @app.command("export-app")

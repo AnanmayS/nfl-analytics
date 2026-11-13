@@ -101,3 +101,23 @@ def test_no_line_means_stats_only_and_no_spread_bet():
     p, source = b.home_prob(0.62, None, None)
     assert (p, source) == (0.62, "stats only")
     assert b.make_bets(g, p, source, NOW, "live") == []
+
+
+def test_next_wake_is_an_hour_before_the_next_unbet_kickoff():
+    sched = pl.DataFrame([game("a", "13:00"), game("b", "16:25"),
+                          game("old", gameday="2026-10-19", home_score=24, away_score=17)])
+    # 'a' kicks off 17:00 UTC: wake at 16:00 UTC
+    assert b.next_wake(sched, b.empty(), NOW - timedelta(hours=3)) == NOW
+    # once 'a' is bet, the next one is 'b' (20:25 UTC) - but 'a' is being played by then,
+    # so we wake every SETTLE_POLL to look for its final score
+    ledger = b.place(sched, preds(["a", "b"]), b.empty(), NOW)
+    assert b.next_wake(sched, ledger, NOW) == datetime(2026, 10, 25, 19, 25, tzinfo=UTC)
+    during = datetime(2026, 10, 25, 17, 30, tzinfo=UTC)
+    assert b.next_wake(sched, ledger, during) == during + b.SETTLE_POLL
+
+
+def test_next_wake_retries_a_due_game_without_a_line_and_stops_after_the_season():
+    sched = pl.DataFrame([game("a", "12:40", spread=None, hml=None, aml=None)])
+    assert b.next_wake(sched, b.empty(), NOW) == NOW + b.RETRY  # in its betting hour
+    done = pl.DataFrame([game("a", gameday="2026-10-19", home_score=24, away_score=17)])
+    assert b.next_wake(done, b.empty(), NOW) is None
