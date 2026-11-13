@@ -333,7 +333,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 
 ## Leakage safeguards and tests
 
-`make test` runs 53 tests:
+`make test` runs 55 tests:
 
 - **Feature definitions** (`test_receiving_features.py`): sacks, two-point tries and postseason are excluded; share denominators use only games the player appeared in; CROE and YACOE match hand calculations; the NGS weekly fallback works.
 - **Archetype helpers** (`test_archetypes.py`): naming order and uniqueness; standardization uses fit-set statistics only.
@@ -347,7 +347,7 @@ The 46 mix columns overfit the linear models. XGBoost picks up a sliver, but the
 - **Starting QB** (`test_quarterbacks.py`): ratings use only earlier games and decay old seasons; a new or unknown QB rates at replacement level; a listed starter wins; injured reserve or an Out listing falls back to the backup.
 - **Ratings and blend** (`test_ratings_blend.py`): ratings recover the true team order, don't move when games on or after the week start are changed, and the blend produces nothing for games without a line.
 - **Opening lines and Tuesday picks** (`test_odds_early.py`): old team names, ±1-day dates, duplicate team codes and swapped neutral-site listings match the right game; the evaluation counts disagreements and line moves correctly.
-- **Paper bets** (`test_bets.py`): bets go in only in the hour before kickoff, never after it and never twice; backfill uses only finished games; Eastern kickoff times convert across daylight saving; moneyline, spread and push settlement and payouts match hand calculations; value bets can take the underdog. The stored blend coefficients reproduce the blend exactly (`test_ratings_blend.py`).
+- **Paper bets** (`test_bets.py`): bets go in only in the hour before kickoff, never after it and never twice; backfill uses only finished games; Eastern kickoff times convert across daylight saving; moneyline, spread and push settlement and payouts match hand calculations; value bets can take the underdog; the next run is set for an hour before the next unbet kickoff, sooner while a bet game is being played. The stored blend coefficients reproduce the blend exactly (`test_ratings_blend.py`).
 - **Integration** (`test_game_features_integration.py`): on the real DB, features for games on a date are identical (to 1e-12) whether or not that date's and later games exist in the input.
 
 The walk-forward loop trains only on `game_date < week_start`. Archetype projections for 2026 use models fit on 2016–2025. Pre-kickoff mix features use only earlier snaps and earlier-season archetypes.
