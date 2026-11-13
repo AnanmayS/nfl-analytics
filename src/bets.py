@@ -1,12 +1,13 @@
 """Paper betting: flat bets on our picks, placed about an hour before kickoff, then settled.
 
-Every run (`python -m src.cli bets`, every 15 minutes in .github/workflows/bets.yml):
+Every run (`python -m src.cli bets`; scripts/bets_watch.sh repeats it on time on GitHub):
 
 1. pulls the current season's schedule from nflverse for the latest lines and scores;
 2. for each game kicking off within the next hour that has no bet yet, re-blends the stats
    model with the line as it stands now (the blend's coefficients for that week are stored in
    game_predictions) and places one bet per strategy;
-3. settles every open bet whose game has a final score.
+3. settles every open bet whose game has a final score;
+4. works out when it should run next (next_wake).
 
 The ledger (data/bets.parquet) only ever grows: a bet's odds, line and probability are fixed
 when it's placed. Games that kicked off before the ledger existed are backfilled once from
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -31,7 +33,9 @@ log = logging.getLogger(__name__)
 LEDGER = DATA / "bets.parquet"
 STAKE = 100.0
 LEAD = timedelta(minutes=60)  # bet this long before kickoff...
-GRACE = timedelta(minutes=5)  # ...give or take a late scheduled run
+GRACE = timedelta(minutes=5)  # ...give or take a late run
+RETRY = timedelta(minutes=5)  # a game in its betting hour with no line posted yet
+SETTLE_POLL = timedelta(minutes=20)  # how often to look for final scores of games in progress
 VALUE_EDGE = 0.03  # value bets need our win chance 3+ points above the odds' break-even
 DEFAULT_SPREAD_ODDS = -110
 EASTERN = ZoneInfo("America/New_York")  # nflverse gametimes are Eastern
@@ -241,9 +245,28 @@ def place(schedule: pl.DataFrame, preds: pl.DataFrame, ledger: pl.DataFrame, now
     return pl.concat([ledger, pl.DataFrame(rows, schema=SCHEMA)]).sort("kickoff", "bet_id")
 
 
-def run(now: datetime | None = None, backfill: bool | None = None) -> bool:
+def next_wake(schedule: pl.DataFrame, ledger: pl.DataFrame, now: datetime) -> datetime | None:
+    """When the next run should happen: an hour before the next unbet kickoff (RETRY from now
+    if that game is already in its betting hour but has no line), or SETTLE_POLL from now
+    while a game we bet on is being played. None once the season has nothing left to do."""
+    have = set(ledger["game_id"].to_list())
+    kicks = [kickoff_utc(g["gameday"], g["gametime"]) for g in schedule.filter(
+        pl.col("result").is_null()).iter_rows(named=True) if g["game_id"] not in have]
+    wakes = []
+    upcoming = [k for k in kicks if k > now]
+    if upcoming:
+        due = min(upcoming) - LEAD
+        wakes.append(due if due > now else now + RETRY)
+    if ledger.filter((pl.col("status") == "open") & (pl.col("kickoff") <= now)).height:
+        wakes.append(now + SETTLE_POLL)
+    return min(wakes) if wakes else None
+
+
+def run(now: datetime | None = None, backfill: bool | None = None,
+        next_run: Path | None = None) -> bool:
     """Place due bets and settle finished ones; returns whether the ledger changed. A new
-    ledger is backfilled with this season's finished games (backfill=None)."""
+    ledger is backfilled with this season's finished games (backfill=None). With next_run,
+    writes the Unix time of the next useful run there (empty: nothing left this season)."""
     now = now or datetime.now(UTC)
     ledger = load()
     if backfill is None:
@@ -252,12 +275,17 @@ def run(now: datetime | None = None, backfill: bool | None = None) -> bool:
     if not set(BLEND_COEFS) <= set(preds.columns):
         # Built before the blend coefficients were stored: bets would ignore the line
         log.warning("game_predictions has no blend coefficients; run `make refresh` first")
+        _write_next(next_run, now + timedelta(minutes=30))
         return False
     schedule = _schedule()
     before = ledger.height, ledger.filter(pl.col("status") == "open").height
     ledger = place(schedule, preds, ledger, now, backfill=backfill)
     ledger = settle(ledger, schedule, now)
     after = ledger.height, ledger.filter(pl.col("status") == "open").height
+    wake = next_wake(schedule, ledger, now)
+    _write_next(next_run, wake)
+    log.info("next run: %s", wake.astimezone(EASTERN).strftime("%a %b %-d %-I:%M %p ET")
+             if wake else "none (season over)")
     if after == before and LEDGER.exists():
         log.info("no bets due; %d open", after[1])
         return False
@@ -265,3 +293,8 @@ def run(now: datetime | None = None, backfill: bool | None = None) -> bool:
     ledger.write_parquet(LEDGER)
     log.info("ledger: %d bets (%d new), %d open", after[0], after[0] - before[0], after[1])
     return True
+
+
+def _write_next(path: Path | None, when: datetime | None) -> None:
+    if path is not None:
+        path.write_text("" if when is None else str(int(when.timestamp())))
