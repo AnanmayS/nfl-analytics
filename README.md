@@ -66,7 +66,7 @@ The dashboard can run online so the picks are there every week without the Mac:
 
 The runner doesn't have `data/external/nfl.xlsx`. The export also drops every opening-line column and the Tuesday-pick tables, so nothing from that personal-use file is published. The Tuesday section of Track record therefore shows only on the local dashboard.
 
-A second workflow, **Place bets** (`.github/workflows/bets.yml`), runs every 15 minutes and keeps the paper-bet ledger (below) as `bets.parquet` on the same release.
+A second workflow, **Place bets** (`.github/workflows/bets.yml`), runs through each game day and keeps the paper-bet ledger (below) as `bets.parquet` on the same release.
 
 One-time setup: at [share.streamlit.io](https://share.streamlit.io), sign in with GitHub, choose **Create app**, pick this repo, branch `main` and file `app/streamlit_app.py`, and set Python 3.12 under Advanced settings. A Community Cloud app sleeps after several days without visitors and wakes in about 30 seconds when opened.
 
@@ -97,7 +97,15 @@ Fans see the **final pick**: the stats model blended with the betting line when 
 
 To see what betting our picks would actually win or lose, `src/bets.py` "places" a flat $100 bet on every game about an hour before kickoff and settles it from the final score. No money is involved.
 
-**When.** The *Place bets* workflow runs every 15 minutes from 12:00 to 05:59 UTC. That covers every kickoff from 9:30 AM ET London games through Monday night, plus settling the late games. Each run pulls the current season's schedule from nflverse for the latest lines and scores, then bets every game that kicks off within the next 60 minutes (65 to allow for a late run) and doesn't have a bet yet. GitHub sometimes starts scheduled runs late. If a game has already kicked off it is skipped, never bet late.
+**When.** Each bet step pulls the current season's schedule from nflverse for the latest lines and scores, then bets every game that kicks off within the next 60 minutes (65 to allow for a late wake-up) and doesn't have a bet yet. A game that has already kicked off is skipped, never bet late.
+
+The *Place bets* workflow first ran the step on a 15-minute schedule, but GitHub delays and drops frequent scheduled runs: it ran about every 6 hours, roughly a quarter of weeks 8–9 got no bet, and the rest went in about 35 minutes before kickoff. So a run now stays up for most of GitHub's 6-hour job limit (`scripts/bets_watch.sh`). After each bet step it sleeps until the step says it's next needed:
+
+- an hour before the next kickoff without a bet;
+- 5 minutes later, if that game is already within the hour but has no line yet;
+- every 20 minutes while a game we bet on is being played, to settle it.
+
+Each round downloads the latest predictions first, so Saturday's refresh is used on Sunday. When a run's time is up and the next game is less than a day away, it starts the next run itself. Over longer midweek gaps it stops, and a backstop schedule (every 3 hours) starts a new run that picks the chain up again. Only one run touches the ledger at a time.
 
 **The pick.** The stats model comes from the last refresh (Tuesday or Saturday). It's blended with the line **as it stands at bet time**, using that week's fitted blend coefficients (`blend_coef_*` in `game_predictions`), so a line that moved since Saturday still counts. Games with no line get no bet.
 
@@ -113,7 +121,7 @@ To see what betting our picks would actually win or lose, `src/bets.py` "places"
 
 **The ledger** (`data/bets.parquet`, one row per bet) only grows. Odds, line, our win chance and the break-even are fixed when a bet is placed. Each row also stores its status, scores and profit. When a new ledger is started, this season's finished games are **backfilled** from the closing line and marked `backfill`, so the season total starts at week 1; every later bet is `live`. `python -m src.cli bets --backfill` fills games a live run missed the same way.
 
-On GitHub the ledger lives on the `app-data` release, with a `bets-backup.parquet` copy, and is uploaded only when it changes. A new ledger is started only if neither was ever published; a failed download stops the run instead of replacing the ledger. The hosted dashboard downloads it every 15 minutes. Locally, `make bets` does one run against `data/bets.parquet`, and the local dashboard reads that file if it exists, otherwise the published ledger. Bets need predictions built with the blend coefficients, so after upgrading, run `make refresh` (or the Refresh picks workflow) once. Until then the bet step logs a warning and places nothing.
+On GitHub the ledger lives on the `app-data` release, with a `bets-backup.parquet` copy, and is uploaded only when it changes. A new ledger is started only if neither was ever published; a failed download stops the run instead of replacing the ledger. The hosted dashboard checks for a new copy every 15 minutes. Locally, `make bets` does one run against `data/bets.parquet`, and the local dashboard reads that file if it exists, otherwise the published ledger. Bets need predictions built with the blend coefficients, so after upgrading, run `make refresh` (or the Refresh picks workflow) once. Until then the bet step logs a warning and places nothing.
 
 **What to expect.** The final pick leans almost entirely on the betting line (see "Closing the gap to Vegas"). Betting it every game should come out near break-even minus the bookmaker's cut. Backfilling 2026 weeks 1–6 gave −5.8% on moneylines (58-34-1) and −13.9% on spreads (39-48-6). The value strategy bets rarely and is too small a sample to judge.
 
