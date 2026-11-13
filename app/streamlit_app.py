@@ -589,8 +589,8 @@ def page_bets() -> None:
              "No real money: this tracks what betting our picks would have won or lost.")
     ledger = bets_ledger()
     if ledger is None or ledger.height == 0:
-        st.info("No bets yet. They're placed by the *Place bets* GitHub Action every 15 "
-                "minutes (or `make bets` locally) once the picks have been refreshed.")
+        st.info("No bets yet. The *Place bets* GitHub Action places them an hour before "
+                "each kickoff (or `make bets` locally) once the picks have been refreshed.")
         return
     ledger = ledger.with_columns(
         kickoff_et=pl.col("kickoff").dt.convert_time_zone("America/New_York"),

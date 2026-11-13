@@ -1,28 +1,31 @@
-# Paper bets (src/bets.py): every 15 minutes, place flat bets on games kicking off within the
-# hour, using the line at that moment, and settle finished games. The ledger is the
-# `bets.parquet` asset on the `app-data` release, next to the dashboard database it reads
-# predictions from; the hosted dashboard downloads it too. Nothing is committed.
+# Paper bets (src/bets.py): place flat bets on games about an hour before kickoff, using the
+# line at that moment, and settle finished games. The ledger is the `bets.parquet` asset on
+# the `app-data` release, next to the dashboard database it reads predictions from; the
+# hosted dashboard downloads it too. Nothing is committed.
+#
+# GitHub delays and drops frequent scheduled runs, so a run doesn't bet once and exit: it
+# stays up for most of the 6-hour job limit, waking an hour before each kickoff
+# (scripts/bets_watch.sh), then starts the next run if a game is due within a day. The
+# schedule below is only a backstop that restarts this after quiet midweek gaps or a failure.
 name: Place bets
 
 on:
   schedule:
-    # 12:00-05:59 UTC covers every kickoff window (9:30 AM ET London games through Monday
-    # night) plus settling the late games. GitHub may start scheduled runs a few minutes late;
-    # a game that has already kicked off is skipped, never bet late.
-    - cron: "*/15 0-5,12-23 * * *"
+    - cron: "17 */3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write  # upload the release asset
+  actions: write   # start the next run
 
 concurrency:
-  group: bets
+  group: bets  # one writer for the ledger; a backstop run that fires meanwhile waits its turn
   cancel-in-progress: false
 
 jobs:
   bets:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
@@ -33,32 +36,32 @@ jobs:
 
       - run: uv sync --frozen
 
-      - name: Download predictions and ledger
+      - name: Download ledger
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p data
-          gh release download app-data -p app.duckdb -D data
           # Start a new ledger (src/bets.py backfills the season) only when none was ever
           # published. If one exists, a failed download fails the run instead of replacing
           # the ledger. The backup covers an upload that failed partway through --clobber.
           assets=$(gh release view app-data --json assets -q '.assets[].name')
           if grep -qx bets.parquet <<< "$assets"; then
             gh release download app-data -p bets.parquet -D data
-            sha256sum data/bets.parquet > data/bets.sha  # publish only if this run changes it
+            sha256sum data/bets.parquet > data/bets.sha  # publish only if a run changes it
           elif grep -qx bets-backup.parquet <<< "$assets"; then
             gh release download app-data -p bets-backup.parquet -D data
             mv data/bets-backup.parquet data/bets.parquet  # no checksum: republish it
           fi
 
-      - run: uv run python -m src.cli bets
-
-      - name: Publish ledger
+      - name: Place and settle bets on time
+        id: watch
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -f data/bets.parquet ] && ! sha256sum -c --status data/bets.sha 2>/dev/null; then
-            cp data/bets.parquet data/bets-backup.parquet
-            gh release upload app-data data/bets-backup.parquet --clobber
-            gh release upload app-data data/bets.parquet --clobber
-          fi
+        run: scripts/bets_watch.sh
+
+      # Runs started with this workflow's own token are allowed for workflow_dispatch
+      - name: Hand off to the next run
+        if: steps.watch.outputs.handoff == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bets.yml --ref "${{ github.ref_name }}"
